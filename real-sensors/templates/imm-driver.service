@@ -1,0 +1,19 @@
+[Unit]
+Description=IMM-OS Sensor Driver
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu
+ExecStart=/usr/bin/python3 /home/ubuntu/imm-driver.py
+Environment="MQTT_HOST=192.168.1.100"
+Environment="MQTT_PORT=1883"
+Environment="PUBLISH_INTERVAL_S=5"
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
