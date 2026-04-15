@@ -1,0 +1,20 @@
+# ── Protocol Buffers ─────────────────────────────────────────────
+protobuf==4.25.3
+grpcio-tools==1.62.1
+
+# ── Sensor Integrations ──────────────────────────────────────────
+# Base I2C / SPI / UART interfaces
+smbus2==0.4.3
+pyserial==3.5
+
+# Specific Adafruit standard hardware libraries
+adafruit-blinka==8.38.1
+adafruit-circuitpython-scd4x==1.2.14
+adafruit-circuitpython-tsl2561==3.4.15
+adafruit-circuitpython-tca9548a==1.5.15
+adafruit-circuitpython-ads1x15==2.2.22
+
+# Other community hardware drivers
+RPi.bme280==0.2.6
+max30100==0.1.2
+pi-ina219==1.0.0

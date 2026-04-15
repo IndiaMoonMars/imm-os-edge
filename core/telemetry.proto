@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// Telemetry envelope representing an arbitrary JSON dictionary logged locally
+message TelemetryRecord {
+    int64 timestamp = 1;
+    string sensor_type = 2;
+    string payload_json = 3;  // Contains the JSON string representation of the signed payload envelope.
+    string signature = 4;
+}
+
+// A chunk of records used to flush into .pb file efficiently
+message TelemetryChunk {
+    repeated TelemetryRecord records = 1;
+}

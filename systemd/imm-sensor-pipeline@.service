@@ -1,0 +1,21 @@
+[Unit]
+Description=IMM-OS Sensor Pipeline (%i)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/imm-os-edge
+Environment="IMM_SECRET_KEY=default-dev-secret"
+Environment="IMM_BLACKBOX_DIR=/var/lib/imm-os/blackbox"
+
+# The %i parameter will be replaced by the sensor driver script name 
+# (e.g. 'bme280_driver.py')
+ExecStart=/bin/sh -c 'python3 sensor_drivers/%i | python3 core/encryption_layer.py | python3 core/blackbox_logger.py'
+
+Restart=always
+RestartSec=10
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
