@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
-"""
-IMM-OS SCD40 Sensor Driver (CO₂, Temperature, Humidity)
-Reads from the SCD40 via I2C every 5 seconds.
-Outputs JSON to stdout.
-"""
+"""IMM-OS SCD40 Driver — CO₂ / Temp / Humidity. Modes: stdout | mqtt"""
 
-import time
-import json
-import sys
-import board
-import adafruit_scd4x
+import argparse, sys, time, json, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+MQTT_TOPIC = "habitat/sensors/scd40/zone1"
 
-def main():
+def read_loop(publish_fn):
     try:
-        # Create I2C bus object
-        i2c = board.I2C()  # Uses board.SCL and board.SDA
+        import board
+        import adafruit_scd4x
+        i2c = board.I2C()
         scd40 = adafruit_scd4x.SCD4X(i2c)
         scd40.start_periodic_measurement()
-        
     except Exception as e:
-        print(json.dumps({"error": f"Failed to initialize SCD40: {e}"}), file=sys.stderr)
-        sys.exit(1)
+        print(json.dumps({"error": f"SCD40 init: {e}"}), file=sys.stderr); sys.exit(1)
 
     while True:
         try:
@@ -28,18 +21,25 @@ def main():
                 payload = {
                     "sensor": "scd40",
                     "co2_ppm": scd40.CO2,
-                    "temp": round(scd40.temperature, 2) if scd40.temperature else None,
-                    "hum": round(scd40.relative_humidity, 2) if scd40.relative_humidity else None,
+                    "temp": round(scd40.temperature, 2),
+                    "hum": round(scd40.relative_humidity, 2),
                     "timestamp": int(time.time()),
                 }
-                
-                if payload["co2_ppm"]:
-                    print(json.dumps(payload), flush=True)
-
+                publish_fn(payload)
         except Exception as e:
-            print(json.dumps({"error": f"SCD40 read error: {str(e)}"}), file=sys.stderr)
-
+            print(json.dumps({"error": f"SCD40 read: {e}"}), file=sys.stderr)
         time.sleep(5.0)
 
-if __name__ == '__main__':
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    args = parser.parse_args()
+    if args.mode == "mqtt":
+        from mqtt_publisher import create_client, publish as mp
+        c = create_client(); publish_fn = lambda p: mp(c, MQTT_TOPIC, p)
+    else:
+        publish_fn = lambda p: print(json.dumps(p), flush=True)
+    read_loop(publish_fn)
+
+if __name__ == "__main__":
     main()

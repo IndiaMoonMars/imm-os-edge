@@ -1,50 +1,44 @@
 #!/usr/bin/env python3
-"""
-IMM-OS MQ-7 UART Bridge (CO Sensor)
-Reads UART stream from STM32 which processes the MQ-7 analog signal.
-Outputs JSON to stdout.
-"""
+"""IMM-OS MQ-7 UART Bridge — CO ppm from STM32. Modes: stdout | mqtt"""
 
-import serial
-import json
-import time
-import sys
-
-# Default serial port for RPi GPIO UART
+import argparse, sys, time, json, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+MQTT_TOPIC = "habitat/sensors/mq7/zone1"
 SERIAL_PORT = "/dev/serial0"
 BAUD_RATE = 115200
 
-def main():
+def read_loop(publish_fn):
     try:
+        import serial
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2.0)
         ser.flushInput()
     except Exception as e:
-        print(json.dumps({"error": f"Failed to open UART {SERIAL_PORT}: {e}"}), file=sys.stderr)
-        sys.exit(1)
+        print(json.dumps({"error": f"UART init: {e}"}), file=sys.stderr); sys.exit(1)
 
     while True:
         try:
             if ser.in_waiting > 0:
                 line = ser.readline().decode('utf-8').strip()
-                
-                # Assume STM32 sends comma-separated values or simple float: "CO_PPM: 3.5" or just "3.5"
-                # We'll try to parse it as float for this phase
                 if line:
                     co_ppm = float(line.split(':')[-1].strip())
-                    
-                    payload = {
-                        "sensor": "mq7",
-                        "co_ppm": round(co_ppm, 2),
-                        "timestamp": int(time.time()),
-                    }
-                    print(json.dumps(payload), flush=True)
-                    
+                    payload = {"sensor": "mq7", "co_ppm": round(co_ppm, 2), "timestamp": int(time.time())}
+                    publish_fn(payload)
         except ValueError:
-            print(json.dumps({"error": f"Invalid data from STM32: {line}"}), file=sys.stderr)
+            print(json.dumps({"error": f"Invalid STM32 data: {line}"}), file=sys.stderr)
         except Exception as e:
-            print(json.dumps({"error": f"UART read error: {str(e)}"}), file=sys.stderr)
+            print(json.dumps({"error": f"UART read: {e}"}), file=sys.stderr)
+        time.sleep(1.0)
 
-        time.sleep(1.0) # Rate limit UART reading to 1Hz based on requirements
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    args = parser.parse_args()
+    if args.mode == "mqtt":
+        from mqtt_publisher import create_client, publish as mp
+        c = create_client(); publish_fn = lambda p: mp(c, MQTT_TOPIC, p)
+    else:
+        publish_fn = lambda p: print(json.dumps(p), flush=True)
+    read_loop(publish_fn)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

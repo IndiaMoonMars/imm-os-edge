@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """
 IMM-OS BME280 Sensor Driver (Temperature, Humidity, Pressure)
-Outputs JSON readings to stdout every 1 second.
+Modes:
+  --mode stdout  (default)  — prints JSON to stdout (Phase 1 pipe mode)
+  --mode mqtt               — publishes to MQTT broker via env MQTT_HOST/MQTT_PORT
 """
 
+import argparse
+import sys
 import time
 import json
-import smbus2
-import bme280
-import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 
-# Default I2C port for Raspberry Pi is 1
 I2C_PORT = 1
-# BME280 default I2C address
 BME280_ADDRESS = 0x76
+MQTT_TOPIC = "habitat/sensors/bme280/zone1"
 
-def main():
+
+def read_loop(publish_fn):
     try:
+        import smbus2
+        import bme280
         bus = smbus2.SMBus(I2C_PORT)
-        # Load calibration parameters from the sensor
         calibration_params = bme280.load_calibration_params(bus, BME280_ADDRESS)
     except Exception as e:
-        # Fails gracefully if hardware is not attached
-        print(json.dumps({"error": f"Failed to initialize BME280: {e}"}), file=sys.stderr)
+        print(json.dumps({"error": f"BME280 init failed: {e}"}), file=sys.stderr)
         sys.exit(1)
 
     while True:
         try:
-            # Read sensor data
             data = bme280.sample(bus, BME280_ADDRESS, calibration_params)
-
             payload = {
                 "sensor": "bme280",
                 "temp": round(data.temperature, 2),
@@ -37,14 +38,26 @@ def main():
                 "pres": round(data.pressure, 2),
                 "timestamp": int(time.time()),
             }
-
-            # JSON payload output to stdout (pipe ready)
-            print(json.dumps(payload), flush=True)
-
+            publish_fn(payload)
         except Exception as e:
-            print(json.dumps({"error": f"BME280 read error: {str(e)}"}), file=sys.stderr)
-
+            print(json.dumps({"error": f"BME280 read: {e}"}), file=sys.stderr)
         time.sleep(1.0)
 
-if __name__ == '__main__':
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    args = parser.parse_args()
+
+    if args.mode == "mqtt":
+        from mqtt_publisher import create_client, publish as mqtt_pub
+        client = create_client()
+        publish_fn = lambda p: mqtt_pub(client, MQTT_TOPIC, p)
+    else:
+        publish_fn = lambda p: print(json.dumps(p), flush=True)
+
+    read_loop(publish_fn)
+
+
+if __name__ == "__main__":
     main()

@@ -1,63 +1,44 @@
 #!/usr/bin/env python3
-"""
-IMM-OS ECG Driver (AD8232 via ADS1115 ADC)
-Samples ECG at 250Hz.
-Outputs JSON to stdout.
-"""
+"""IMM-OS ECG Driver — AD8232 via ADS1115 at 250Hz. Modes: stdout | mqtt"""
 
-import time
-import json
-import sys
-import board
-import busio
-import adafruit_ads1x15.ads1115 as ADS
-from adafruit_ads1x15.analog_in import AnalogIn
+import argparse, sys, time, json, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+MQTT_TOPIC = "habitat/sensors/ecg/zone1"
 
-def main():
+def read_loop(publish_fn):
     try:
-        # Create the I2C bus
+        import board, busio
+        import adafruit_ads1x15.ads1115 as ADS
+        from adafruit_ads1x15.analog_in import AnalogIn
         i2c = busio.I2C(board.SCL, board.SDA)
-
-        # Create the ADC object using the I2C bus
-        # AD8232 OUT pin connected to ADS1115 channel 0
         ads = ADS.ADS1115(i2c)
-        
-        # Configure data rate to max 860 SPS to achieve our 250Hz loops without blocking
         ads.data_rate = 860
-        
         chan = AnalogIn(ads, ADS.P0)
-
     except Exception as e:
-        print(json.dumps({"error": f"Failed to initialize ADC for ECG: {e}"}), file=sys.stderr)
-        sys.exit(1)
+        print(json.dumps({"error": f"ECG/ADC init: {e}"}), file=sys.stderr); sys.exit(1)
 
     while True:
         try:
-            # At 250Hz, we need very tight loops. Standard print() is slow, 
-            # but we're piping this to another python process. In production, 
-            # ECG should ideally be batched. We'll output individual samples per the requirement.
-            
-            start_time = time.time()
-            
-            # Read voltage from ADC
-            voltage = chan.voltage
-            
-            payload = {
-                "sensor": "ecg_ad8232",
-                "voltage": round(voltage, 4),
-                "timestamp": time.time(), # microsecond resolution
-            }
-            
-            print(json.dumps(payload), flush=True)
-
-            # Sleep precisely enough to maintain 250Hz (0.004 seconds per loop)
-            elapsed = time.time() - start_time
-            sleep_time = max(0, 0.004 - elapsed)
-            time.sleep(sleep_time)
-
+            start = time.time()
+            payload = {"sensor": "ecg_ad8232", "voltage": round(chan.voltage, 4),
+                       "timestamp": time.time()}
+            publish_fn(payload)
+            elapsed = time.time() - start
+            time.sleep(max(0, 0.004 - elapsed))
         except Exception as e:
-            print(json.dumps({"error": f"ECG read error: {str(e)}"}), file=sys.stderr)
+            print(json.dumps({"error": f"ECG read: {e}"}), file=sys.stderr)
             time.sleep(1)
 
-if __name__ == '__main__':
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    args = parser.parse_args()
+    if args.mode == "mqtt":
+        from mqtt_publisher import create_client, publish as mp
+        c = create_client(); publish_fn = lambda p: mp(c, MQTT_TOPIC, p)
+    else:
+        publish_fn = lambda p: print(json.dumps(p), flush=True)
+    read_loop(publish_fn)
+
+if __name__ == "__main__":
     main()

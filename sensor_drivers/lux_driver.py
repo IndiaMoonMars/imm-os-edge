@@ -1,60 +1,44 @@
 #!/usr/bin/env python3
-"""
-IMM-OS Lux Sensor Driver (Multiplexed TSL2561)
-Reads from 3 TSL2561 sensors for 3 different habitat zones.
-Since TSL2561 shares standard I2C addresses, we assume a TCA9548A multiplexer is used.
-Outputs JSON to stdout.
-"""
+"""IMM-OS Lux Driver — 3x TSL2561 via TCA9548A multiplexer. Modes: stdout | mqtt"""
 
-import time
-import json
-import sys
-import board
-import busio
-import adafruit_tsl2561
-import adafruit_tca9548a
+import argparse, sys, time, json, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+ZONES = {"Zone_A": 0, "Zone_B": 1, "Zone_C": 2}
 
-def main():
+def read_loop(publish_fn):
     try:
-        # Create I2C bus
+        import board, busio
+        import adafruit_tsl2561, adafruit_tca9548a
         i2c = busio.I2C(board.SCL, board.SDA)
-        
-        # Create the TCA9548A multiplexer
         tca = adafruit_tca9548a.TCA9548A(i2c)
-        
-        # Initialize 3 TSL2561 sensors on channels 0, 1, and 2
-        sensor_zone_A = adafruit_tsl2561.TSL2561(tca[0])
-        sensor_zone_B = adafruit_tsl2561.TSL2561(tca[1])
-        sensor_zone_C = adafruit_tsl2561.TSL2561(tca[2])
-        
-        sensors = {
-            "Zone_A": sensor_zone_A,
-            "Zone_B": sensor_zone_B,
-            "Zone_C": sensor_zone_C
-        }
-
+        sensors = {zone: adafruit_tsl2561.TSL2561(tca[ch]) for zone, ch in ZONES.items()}
     except Exception as e:
-        print(json.dumps({"error": f"Failed to initialize TSL2561 array: {e}"}), file=sys.stderr)
-        sys.exit(1)
+        print(json.dumps({"error": f"TSL2561 init: {e}"}), file=sys.stderr); sys.exit(1)
 
     while True:
-        try:
-            for zone, sensor in sensors.items():
+        for zone, sensor in sensors.items():
+            try:
                 lux = sensor.lux
-                
                 if lux is not None:
-                    payload = {
-                        "sensor": "tsl2561",
-                        "zone": zone,
-                        "lux": round(lux, 1),
-                        "timestamp": int(time.time()),
-                    }
-                    print(json.dumps(payload), flush=True)
+                    payload = {"sensor": "tsl2561", "zone": zone,
+                               "lux": round(lux, 1), "timestamp": int(time.time())}
+                    topic = f"habitat/sensors/tsl2561/{zone.lower()}"
+                    publish_fn(payload, topic)
+            except Exception as e:
+                print(json.dumps({"error": f"TSL2561 {zone}: {e}"}), file=sys.stderr)
+        time.sleep(1.0)
 
-        except Exception as e:
-            print(json.dumps({"error": f"TSL2561 read error: {str(e)}"}), file=sys.stderr)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    args = parser.parse_args()
+    if args.mode == "mqtt":
+        from mqtt_publisher import create_client, publish as mp
+        c = create_client()
+        publish_fn = lambda p, t: mp(c, t, p)
+    else:
+        publish_fn = lambda p, t: print(json.dumps(p), flush=True)
+    read_loop(publish_fn)
 
-        time.sleep(1.0) # 1Hz read rate
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
