@@ -18,3 +18,8 @@ adafruit-circuitpython-ads1x15==2.2.22
 RPi.bme280==0.2.6
 max30100==0.1.2
 pi-ina219==1.0.0
+
+# ── Core Edge Networking & Replay ───────────────────────────────
+paho-mqtt==1.6.1
+confluent-kafka==2.3.0
+requests==2.31.0
