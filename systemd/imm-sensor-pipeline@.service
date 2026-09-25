@@ -6,6 +6,8 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/imm-os-edge
+# Shared node config + secrets (see edge.env.example); optional
+EnvironmentFile=-/etc/imm-os/edge.env
 Environment="IMM_SECRET_KEY=default-dev-secret"
 Environment="IMM_BLACKBOX_DIR=/var/lib/imm-os/blackbox"
 

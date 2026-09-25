@@ -9,6 +9,10 @@ import json
 import logging
 import requests
 import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from auth_client import auth_headers  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [tool_tracker] %(message)s")
 log = logging.getLogger(__name__)
@@ -39,7 +43,7 @@ def ensure_tools_registered():
     """Register all tools in EVA API inventory if not already present."""
     for tool in MOCK_TOOLS:
         try:
-            requests.post(f"{API_BASE}/api/v1/eva/tools/register", json=tool, timeout=3)
+            requests.post(f"{API_BASE}/api/v1/eva/tools/register", json=tool, headers=auth_headers(), timeout=3)
         except Exception:
             pass
 
@@ -49,7 +53,7 @@ def scan_cycle():
     for tool in MOCK_TOOLS:
         tag = tool["rfid_tag"]
         # Checkout
-        resp = requests.post(f"{API_BASE}/api/v1/eva/tools/scan", json={
+        resp = requests.post(f"{API_BASE}/api/v1/eva/tools/scan", headers=auth_headers(), json={
             "rfid_tag": tag,
             "action": "CHECKOUT",
             "eva_plan_id": EVA_PLAN_ID,
@@ -63,7 +67,7 @@ def scan_cycle():
 
     for tool in MOCK_TOOLS:
         tag = tool["rfid_tag"]
-        resp = requests.post(f"{API_BASE}/api/v1/eva/tools/scan", json={
+        resp = requests.post(f"{API_BASE}/api/v1/eva/tools/scan", headers=auth_headers(), json={
             "rfid_tag": tag,
             "action": "CHECKIN",
             "eva_plan_id": EVA_PLAN_ID,
