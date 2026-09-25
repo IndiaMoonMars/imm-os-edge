@@ -78,6 +78,9 @@ def fuse_and_publish(pub_client: mqtt.Client):
 
 def main():
     client = mqtt.Client(client_id="pos-fusion")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     client.on_message = on_message
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.subscribe("habitat/eva/uwb")

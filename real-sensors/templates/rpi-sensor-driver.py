@@ -161,6 +161,9 @@ def publish_readings(client: mqtt.Client):
 
 def main():
     client = mqtt.Client(client_id=f"imm-rpi-{NODE_ID}")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     client.on_connect = on_connect
     client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
     client.loop_start()

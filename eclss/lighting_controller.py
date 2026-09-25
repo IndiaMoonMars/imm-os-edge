@@ -69,6 +69,9 @@ def listen_loop():
         log.info(f"Listening for lighting commands on {LIGHTING_TOPIC} @ {host}:{port}")
 
     client = mqtt.Client(client_id=f"imm-lighting-{os.uname().nodename}", clean_session=True)
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     client.on_connect = on_connect
     client.on_message = on_lighting_message
     client.reconnect_delay_set(min_delay=1, max_delay=30)

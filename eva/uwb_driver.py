@@ -34,6 +34,9 @@ def sim_uwb_position(step: int):
 
 def main():
     client = mqtt.Client(client_id="uwb-driver")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_start()
     log.info("UWB Driver online. Publishing to habitat/eva/uwb at 5 Hz.")

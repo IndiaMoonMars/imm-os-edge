@@ -47,6 +47,9 @@ def sim_gprmc(step: int):
 
 def main():
     client = mqtt.Client(client_id="gps-driver")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_start()
     log.info("GPS Driver online. Publishing to habitat/eva/gps at 1 Hz.")

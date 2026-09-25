@@ -163,6 +163,9 @@ def publish_node(client: mqtt.Client, node: dict, state: SensorState, t: float):
 
 def main():
     client = mqtt.Client(client_id="imm-sensor-simulator")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
 

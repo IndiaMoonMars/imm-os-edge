@@ -54,6 +54,9 @@ def sim_ecg(t: float) -> float:
 
 def main():
     client = mqtt.Client(client_id=f"eva-bio-{CREW_ID}")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.loop_start()
     log.info(f"EVA Biosensor Driver online for {CREW_ID} (stress={STRESS_MODE}). Publishing at 5 Hz.")
