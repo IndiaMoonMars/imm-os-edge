@@ -7,16 +7,15 @@ grpcio-tools==1.62.1
 smbus2==0.4.3
 
 # Specific Adafruit standard hardware libraries
-adafruit-blinka==8.38.1
-adafruit-circuitpython-scd4x==1.2.14
-adafruit-circuitpython-tsl2561==3.4.15
-adafruit-circuitpython-tca9548a==1.5.15
+adafruit-blinka==8.38.0
+adafruit-circuitpython-scd4x==1.4.13
+adafruit-circuitpython-tsl2561==3.3.25
+adafruit-circuitpython-tca9548a==0.8.6
 adafruit-circuitpython-ads1x15==2.2.22
 
-# Other community hardware drivers
-RPi.bme280==0.2.6
-max30100==0.1.2
-pi-ina219==1.0.0
+# Other community hardware drivers (MAX30100: core/max30100.py, no package needed)
+RPi.bme280==0.2.4
+pi-ina219==1.4.1
 
 # ── ECLSS / EVA hardware (Phase 5) ───────────────────────────────
 gpiozero==2.0.1; sys_platform == "linux"          # flow meter, PIR, relays (Pi 4 and 5)
@@ -29,6 +28,7 @@ pyserial==3.5                                      # GPS (NEO-M9N) and UWB (DWM1
 paho-mqtt==1.6.1
 confluent-kafka==2.3.0
 requests==2.31.0
+PyYAML==6.0.1                                      # calibration.yaml
 
 # ── Inventory (Phase 11) ─────────────────────────────────────────
 # USB HID barcode scanner input (inventory/barcode_listener.py --device)

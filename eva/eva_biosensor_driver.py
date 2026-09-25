@@ -29,6 +29,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from biometrics import heart_rate, spo2  # noqa: E402
+from calibration import default as calibration  # noqa: E402
 from eva_mqtt import connect, crew_id  # noqa: E402
 from hw import env_int, simulate_requested  # noqa: E402
 
@@ -47,8 +48,8 @@ class PpgSampler(threading.Thread):
 
     def __init__(self):
         super().__init__(daemon=True)
-        import max30100
-        self.dev = max30100.MAX30100()
+        from max30100 import MAX30100   # core/max30100.py
+        self.dev = MAX30100(bus=env_int("I2C_BUS", 1))
         self.dev.enable_spo2()
         n = PPG_HZ * WINDOW_S
         self.ir, self.red = collections.deque(maxlen=n), collections.deque(maxlen=n)
@@ -57,23 +58,22 @@ class PpgSampler(threading.Thread):
 
     def run(self):
         next_calc = time.monotonic() + 1
-        period = 1.0 / PPG_HZ
         while True:
-            t0 = time.monotonic()
             try:
-                self.dev.read_sensor()
-                self.ir.append(self.dev.ir)
-                self.red.append(self.dev.red)
+                for ir, red in self.dev.read_fifo():   # the chip samples at exactly 100 Hz
+                    self.ir.append(ir)
+                    self.red.append(red)
             except OSError as exc:
                 log.warning("MAX30100 read error: %s", exc)
                 time.sleep(0.5)
-            if t0 >= next_calc and len(self.ir) == self.ir.maxlen:
+            now = time.monotonic()
+            if now >= next_calc and len(self.ir) == self.ir.maxlen:
                 ir, red = list(self.ir), list(self.red)
                 hr, ox = heart_rate(ir, PPG_HZ), spo2(red, ir)
                 with self._lock:
                     self.hr, self.spo2 = hr, ox
-                next_calc = t0 + 1
-            time.sleep(max(0.0, period - (time.monotonic() - t0)))
+                next_calc = now + 1
+            time.sleep(0.05)      # FIFO holds 16 samples (160 ms); poll well inside that
 
     def latest(self):
         with self._lock:
@@ -165,6 +165,8 @@ def main():
             if skin and time.monotonic() - skin_t >= 1.0:   # skin temp changes slowly
                 try:
                     last_skin = skin.read()
+                    if last_skin is not None:
+                        last_skin = calibration().correct("mlx90614", "temp", last_skin)
                 except OSError as exc:
                     log.warning("MLX90614 read error: %s", exc)
                     last_skin = None

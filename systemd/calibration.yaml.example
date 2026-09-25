@@ -1,0 +1,19 @@
+# IMM-OS sensor calibration for this node → /etc/imm-os/calibration.yaml
+#   corrected = raw * gain + offset        (core/calibration.py)
+# Record corrections with tools/calibrate.py rather than editing by hand:
+#   IMM_CALIBRATION_OFF=1 python3 sensor_drivers/bme280_driver.py      # raw readings
+#   python3 tools/calibrate.py one-point bme280.temp --raw 23.6 --true 22.8 --reference "Testo 605i"
+#   python3 tools/calibrate.py two-point bme280.hum --raw 31.0,72.9 --true 33.0,75.3 --reference "salt test"
+#   python3 tools/calibrate.py report        # sign-off sheet
+#
+# Sensor / field names:
+#   bme280: temp hum pres         scd40: co2_ppm temp hum      o2: o2_pct      mq7: co_ppm
+#   tsl2561: lux                  ina219: voltage_v current_ma power_mw        jetson: cpu_temp gpu_temp power_w
+#   ds18b20: temp (biolab water)  ezo_ph: ph                   mlx90614: temp (EVA skin)
+# Which reference to use:
+#   temperature  calibrated thermometer next to the sensor, 30 min settle, one-point
+#   humidity     saturated salt jars (MgCl2 ≈ 33 %, NaCl ≈ 75 %), two-point
+#   CO2          outdoor air ≈ 420 ppm (SCD40 also has its own forced recalibration)
+#   O2           fresh air 20.9 % via o2_driver.py --calibrate (sets O2_CAL_MV), then check here
+#   pH           the EZO circuit's own mid/low/high buffer calibration first
+{}

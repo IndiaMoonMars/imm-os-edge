@@ -8,7 +8,8 @@ Drivers call make_publisher(mode, topic) and then publish_fn(payload[, topic]):
   --mode both    publish to the broker AND keep the stdout stream for the blackbox
                  (what the systemd units use)
 
-Every reading is stamped with this node's identity before it leaves the node:
+Every reading is corrected with the node's calibration file and stamped with the
+node's identity before it leaves the node:
   node_id    IMM_NODE_ID (default: hostname)
   zone       the payload's own zone, else IMM_ZONE, else the topic's last segment
   simulated  false (real hardware)
@@ -45,8 +46,12 @@ def publish(client: mqtt.Client, topic: str, payload: dict) -> None:
 
 
 def stamp(payload: dict, topic: str) -> tuple:
-    """Add node_id / zone / simulated and return (payload, topic) with IMM_ZONE applied."""
-    out = dict(payload)
+    """
+    Apply this node's calibration (/etc/imm-os/calibration.yaml), add node_id / zone /
+    simulated, and return (payload, topic) with IMM_ZONE applied.
+    """
+    from calibration import default as calibration
+    out = calibration().apply(payload)
     out.setdefault("node_id", os.getenv("IMM_NODE_ID") or socket.gethostname())
     out.setdefault("simulated", False)
     parts = topic.split("/")

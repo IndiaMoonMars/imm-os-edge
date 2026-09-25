@@ -27,6 +27,7 @@ import time
 from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from calibration import default as calibration  # noqa: E402
 from hw import EventPoster, env_float, env_int, simulate_requested  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [biolab_monitor] %(message)s")
@@ -99,8 +100,12 @@ def main():
             ph, temp = 7.0 + random.uniform(-0.1, 0.1), 24.5 + random.uniform(-0.2, 0.2)
         else:
             temp = read_ds18b20()
+            if temp is not None:
+                temp = calibration().correct("ds18b20", "temp", temp)   # calibration.yaml
             try:
                 ph = read_ezo_ph(bus_no, address, temp)
+                if ph is not None:
+                    ph = calibration().correct("ezo_ph", "ph", ph)
             except OSError as exc:
                 log.error("EZO-pH I2C error: %s", exc)
                 ph = None

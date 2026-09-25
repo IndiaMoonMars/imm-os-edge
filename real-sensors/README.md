@@ -60,31 +60,60 @@ The schema lives in `imm-os-backend/services/telemetry_schema.py`.
 
 ## Bringing a sensor online
 
-1. **Provision the node** (see the Hardware Integration Plan): OS, I2C/UART, and
-   `/etc/imm-os/edge.env` with `IMM_NODE_ID`, `IMM_ZONE`, the MQTT password and the CA cert.
+1. **Set up the node** with `scripts/setup-node.sh` (see the top-level README): packages,
+   interfaces, `/etc/imm-os/edge.env` (`IMM_NODE_ID`, `IMM_ZONE`, MQTT password, CA),
+   calibration file and services, then connectivity checks.
 2. **Bench-test in stdout mode**, which prints readings and sends nothing:
    ```bash
-   python3 sensor_drivers/bme280_driver.py
+   .venv/bin/python sensor_drivers/bme280_driver.py
    ```
-3. **Go live.** The systemd unit runs the driver with `--mode both` (MQTT plus the
-   local encrypted blackbox):
+3. **Go live.** Add the driver to the node's list and re-run setup; the systemd unit
+   runs it with `--mode both` (MQTT plus the local encrypted blackbox):
    ```bash
-   sudo ./systemd/deploy_services.sh bme280_driver.py     # only the sensors fitted here
+   sudo ./scripts/setup-node.sh --sensors "bme280_driver.py scd40_driver.py"
    journalctl -u imm-sensor-pipeline@bme280_driver.py -f
    ```
-4. **Stop simulating that sensor** on the MCC. In `imm-os-infra/.env`:
+   Only the listed drivers run; nothing is started for hardware a node doesn't have.
+4. **Calibrate** against a reference instrument (see "Calibration" below).
+5. **Stop simulating that sensor** on the MCC. In `imm-os-infra/.env`:
    ```
    SIM_DISABLED_SENSORS=node-rpi-01:bme280
    ```
    then `docker compose up -d sensor-sim`. A bare `bme280` stops it on every
    simulated node. When everything is real: `docker compose stop sensor-sim`.
-5. **Check** the Overview page: the value shows **LIVE**. If it doesn't, look for
+6. **Check** the Overview page: the value shows **LIVE**. If it doesn't, look for
    rejected readings:
    ```bash
    docker compose logs telemetry-validator --tail 20
    ```
 
 ---
+
+## Calibration
+
+Each node keeps its corrections in `/etc/imm-os/calibration.yaml`
+(`corrected = raw × gain + offset`), applied to every reading before it is published
+or written to the blackbox. Edit it with `tools/calibrate.py`, which validates entries
+and records the reference, date and who calibrated:
+
+```bash
+IMM_CALIBRATION_OFF=1 .venv/bin/python sensor_drivers/bme280_driver.py     # raw values
+sudo .venv/bin/python tools/calibrate.py one-point bme280.temp --raw 23.6 --true 22.8 --reference "Testo 605i"
+sudo .venv/bin/python tools/calibrate.py two-point bme280.hum --raw 31.0,72.9 --true 33.0,75.3 --reference "salt jars 33/75 %"
+sudo .venv/bin/python tools/calibrate.py report      # Markdown sign-off sheet for the acceptance checklist
+```
+
+| Sensor | Reference method |
+|---|---|
+| temperature (bme280/scd40/ds18b20) | calibrated thermometer beside it, 30 min settle — one-point |
+| humidity | saturated salt jars: MgCl₂ ≈ 33 %, NaCl ≈ 75 % — two-point |
+| CO₂ (scd40) | outdoor air ≈ 420 ppm — one-point |
+| O₂ | `o2_driver.py --calibrate` in fresh air (sets `O2_CAL_MV`), then verify |
+| pH (ezo_ph) | EZO mid/low/high buffer calibration first; calibration.yaml only for residual offset |
+| waste scale | `waste_tracker.py --calibrate 1.0` (sets `HX711_SCALE`) |
+
+Changes take effect on the next reading. A malformed file is ignored (the previous
+good calibration stays in force) and logged.
 
 ## Templates (older format)
 
@@ -111,13 +140,9 @@ Every script in `eclss/` and `eva/` drives real hardware by default. Add
 behaviour without hardware. Settings for all of them are in
 `systemd/edge.env.example`.
 
-**One-time node setup** (Raspberry Pi OS): enable I2C, SPI, the UART and 1-Wire,
-then give the service user access to the hardware:
-```bash
-sudo raspi-config nonint do_i2c 0 && sudo raspi-config nonint do_spi 0
-echo "dtoverlay=w1-gpio" | sudo tee -a /boot/firmware/config.txt     # DS18B20 on GPIO4
-sudo usermod -aG gpio,i2c,spi,dialout,input ubuntu && sudo reboot
-```
+`scripts/setup-node.sh` enables I2C, SPI, the UART and 1-Wire (DS18B20 on GPIO4) and
+adds the service user to the gpio, i2c, spi, dialout and input groups; reboot once
+afterwards if it asks.
 
 | Script | Hardware | Sends | Setup / calibration |
 |---|---|---|---|
@@ -133,11 +158,10 @@ sudo usermod -aG gpio,i2c,spi,dialout,input ubuntu && sudo reboot
 | `eva/eva_biosensor_driver.py` | MAX30100, MLX90614, AD8232+ADS1115 | HR, SpO2, skin temp, ECG at 5 Hz | `CREW_ID` = the wearer's IMM-OS username |
 | `eva/tool_tracker.py` | USB or RC522 RFID reader at the airlock | CHECKOUT/CHECKIN per scan | tools listed in `TOOLS_FILE` (CSV) |
 
-Run them as services by listing them in edge.env and re-running the deploy script:
+Run them as services by listing them when setting up the node:
 ```bash
-IMM_ECLSS_DAEMONS="water_monitor waste_tracker eclss_pid"
-IMM_EVA_DAEMONS="gps_driver uwb_driver position_fusion eva_biosensor_driver"
-sudo ./systemd/deploy_services.sh
+sudo ./scripts/setup-node.sh --eclss "water_monitor waste_tracker eclss_pid" \
+     --eva "gps_driver uwb_driver position_fusion eva_biosensor_driver"
 journalctl -u imm-eclss@water_monitor -f
 ```
 

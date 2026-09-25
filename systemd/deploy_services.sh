@@ -1,68 +1,81 @@
 #!/usr/bin/env bash
-# IMM-OS Edge Node Service Deployment Script
-# Automatically enables and starts all physical sensor drivers.
+# IMM-OS edge node service deployment.
+#
+# Installs the systemd units (filling in where the code lives, which user runs it and
+# which Python to use) and starts the services configured for this node:
+#   sensor pipelines   IMM_SENSORS="bme280_driver.py scd40_driver.py"   (or pass as arguments)
+#   ECLSS daemons      IMM_ECLSS_DAEMONS="water_monitor eclss_pid"
+#   EVA daemons        IMM_EVA_DAEMONS="gps_driver uwb_driver position_fusion"
+#   lighting listener  always (logs only until LIGHT_ZONES is set)
+# The lists are read from /etc/imm-os/edge.env; scripts/setup-node.sh writes them.
+#
+# Overridable: IMM_HOME (default: this checkout), IMM_USER (default: owner of IMM_HOME),
+#              IMM_PYTHON (default: $IMM_HOME/.venv/bin/python if present, else /usr/bin/python3)
+set -euo pipefail
 
 if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root (sudo ./deploy_services.sh)"
-  exit 1
+    echo "Please run as root (sudo ./deploy_services.sh)"
+    exit 1
 fi
 
-echo "Deploying IMM-OS sensor pipelines..."
-
-# Copy templates to systemd config folder
-cp imm-sensor-pipeline@.service /etc/systemd/system/
-cp imm-lighting-controller.service /etc/systemd/system/
-
-systemctl daemon-reload
-
-# Default: every habitat-node driver. To deploy only the sensors fitted to this
-# node, pass them as arguments:  sudo ./deploy_services.sh bme280_driver.py scd40_driver.py
-# (Jetson nodes: sudo ./deploy_services.sh jetson_driver.py)
-if [ "$#" -gt 0 ]; then
-    sensors=("$@")
-else
-    sensors=(
-        "bme280_driver.py"
-        "scd40_driver.py"
-        "o2_driver.py"
-        "mq7_uart_bridge.py"
-        "biosensor_driver.py"
-        "ecg_driver.py"
-        "lux_driver.py"
-        "power_driver.py"
-    )
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMM_HOME="${IMM_HOME:-$(dirname "$HERE")}"
+IMM_USER="${IMM_USER:-$(stat -c %U "$IMM_HOME")}"
+if [ -z "${IMM_PYTHON:-}" ]; then
+    if [ -x "$IMM_HOME/.venv/bin/python" ]; then IMM_PYTHON="$IMM_HOME/.venv/bin/python"; else IMM_PYTHON=/usr/bin/python3; fi
 fi
 
-# Enable and start each pipeline instance
-for s in "${sensors[@]}"
-do
-    echo "Starting pipeline for $s..."
-    systemctl enable "imm-sensor-pipeline@$s"
-    systemctl start "imm-sensor-pipeline@$s"
-done
-
-# ECLSS / EVA daemons fitted to this node, e.g. in /etc/imm-os/edge.env:
-#   IMM_ECLSS_DAEMONS="water_monitor shower_timer waste_tracker biolab_monitor eclss_pid"
-#   IMM_EVA_DAEMONS="gps_driver uwb_driver position_fusion eva_biosensor_driver tool_tracker"
-cp imm-eclss@.service imm-eva@.service /etc/systemd/system/
-systemctl daemon-reload
 if [ -f /etc/imm-os/edge.env ]; then
     # shellcheck disable=SC1091
     . /etc/imm-os/edge.env
 fi
+
+install_unit() {
+    # Units are written for /home/ubuntu/imm-os-edge + user ubuntu + system python3;
+    # rewrite those for this node.
+    sed -e "s#/home/ubuntu/imm-os-edge#$IMM_HOME#g" \
+        -e "s#^User=ubuntu#User=$IMM_USER#" \
+        -e "s#/usr/bin/python3#$IMM_PYTHON#g" \
+        -e "s#sh -c 'python3 #sh -c '$IMM_PYTHON #" \
+        -e "s#| python3 #| $IMM_PYTHON #g" \
+        "$HERE/$1" > "/etc/systemd/system/$1"
+    chmod 644 "/etc/systemd/system/$1"
+}
+
+echo "Installing units (code $IMM_HOME, user $IMM_USER, python $IMM_PYTHON)"
+for unit in imm-sensor-pipeline@.service imm-lighting-controller.service imm-eclss@.service imm-eva@.service; do
+    install_unit "$unit"
+done
+install -d -o "$IMM_USER" -g "$IMM_USER" /var/lib/imm-os /var/lib/imm-os/blackbox /var/lib/imm-os/spool
+systemctl daemon-reload
+
+# Sensor pipelines: arguments win, then IMM_SENSORS. Nothing is started by default,
+# so a node never runs drivers for hardware it doesn't have.
+if [ "$#" -gt 0 ]; then
+    sensors=("$@")
+else
+    read -r -a sensors <<< "${IMM_SENSORS:-}"
+fi
+
+for s in "${sensors[@]}"; do
+    [ -f "$IMM_HOME/sensor_drivers/$s" ] || { echo "  ! unknown driver $s (not in sensor_drivers/)"; continue; }
+    echo "Starting sensor pipeline $s"
+    systemctl enable --now "imm-sensor-pipeline@$s"
+done
 for d in ${IMM_ECLSS_DAEMONS:-}; do
-    echo "Starting ECLSS daemon $d..."
+    [ -f "$IMM_HOME/eclss/$d.py" ] || { echo "  ! unknown ECLSS daemon $d"; continue; }
+    echo "Starting ECLSS daemon $d"
     systemctl enable --now "imm-eclss@$d"
 done
 for d in ${IMM_EVA_DAEMONS:-}; do
-    echo "Starting EVA daemon $d..."
+    [ -f "$IMM_HOME/eva/$d.py" ] || { echo "  ! unknown EVA daemon $d"; continue; }
+    echo "Starting EVA daemon $d"
     systemctl enable --now "imm-eva@$d"
 done
 
-echo "Starting ECLSS lighting controller (MQTT listener)..."
-systemctl enable imm-lighting-controller.service
-systemctl start imm-lighting-controller.service
+echo "Starting ECLSS lighting controller (MQTT listener)"
+systemctl enable --now imm-lighting-controller.service
 
-echo "Deployment complete! Checking status:"
+echo "Deployment complete. Status:"
 sleep 2
-systemctl --no-pager status 'imm-sensor-pipeline@*' 'imm-eclss@*' 'imm-eva@*' imm-lighting-controller.service
+systemctl --no-pager --lines=0 status 'imm-sensor-pipeline@*' 'imm-eclss@*' 'imm-eva@*' imm-lighting-controller.service || true
