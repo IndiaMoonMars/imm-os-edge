@@ -23,3 +23,7 @@ pi-ina219==1.0.0
 paho-mqtt==1.6.1
 confluent-kafka==2.3.0
 requests==2.31.0
+
+# ── Inventory (Phase 11) ─────────────────────────────────────────
+# USB HID barcode scanner input (inventory/barcode_listener.py --device)
+evdev==1.7.1; sys_platform == "linux"
