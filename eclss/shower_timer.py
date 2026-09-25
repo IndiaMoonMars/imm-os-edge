@@ -1,40 +1,86 @@
 #!/usr/bin/env python3
-import time
-import requests
+"""
+Shower timer — PIR motion sensor (HC-SR501) in the hygiene module.
+
+A session starts on the first motion and ends after SHOWER_IDLE_S seconds with no
+motion (set the HC-SR501's own hold-time pot to minimum). Sessions shorter than
+SHOWER_MIN_S (someone passing the door) are ignored. Water use is estimated from the
+duration at SHOWER_LPM litres/minute (a low-flow head is ~6–9 L/min).
+
+Environment:
+  PIR_GPIO=27  SHOWER_IDLE_S=90  SHOWER_MIN_S=30  SHOWER_LPM=9.0
+  ECLSS_API_URL=http://imm.local/eclss
+
+  --simulate   one 3-minute shower, then exit (the old behaviour)
+"""
+import argparse
 import logging
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
-from auth_client import auth_headers  # noqa: E402
+from hw import EventPoster, digital_input, env_float, env_int, simulate_requested  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [shower_timer] %(message)s")
 log = logging.getLogger(__name__)
 
-# HARDWARE MOCKS (PIR Motion Array)
 ECLSS_API_URL = os.getenv("ECLSS_API_URL", "http://localhost:8003")
 API_URL = f"{ECLSS_API_URL}/api/v1/water/shower"
 
+
+class ShowerSession:
+    """Motion samples in, finished sessions out (pure logic, testable)."""
+
+    def __init__(self, idle_s: float, min_s: float):
+        self.idle_s, self.min_s = idle_s, min_s
+        self.started = None
+        self.last_motion = None
+
+    def update(self, motion: bool, now: float):
+        """Returns the finished session's duration in seconds, or None."""
+        if motion:
+            if self.started is None:
+                self.started = now
+                log.info("Shower session started")
+            self.last_motion = now
+            return None
+        if self.started is not None and now - self.last_motion >= self.idle_s:
+            duration = self.last_motion - self.started
+            self.started = self.last_motion = None
+            if duration >= self.min_s:
+                return round(duration, 1)
+            log.info("Ignored %.0f s of motion (shorter than a shower)", duration)
+        return None
+
+
+def report(poster: EventPoster, duration: float, lpm: float) -> None:
+    liters = round(duration / 60.0 * lpm, 1)
+    log.info("Shower: %.1f min, ~%.1f L", duration / 60.0, liters)
+    poster.post({"duration_seconds": duration, "estimated_liters": liters})
+
+
 def main():
-    log.info("Starting PIR Shower Timer Daemon")
-    # Simulate a PIR sensor activating, staying ON for 3 minutes, then dropping.
-    log.info("PIR Triggered! Tracking shower flow...")
-    
-    # 3 mins duration = 180 seconds. Using sleep for simulation speed.
-    shower_duration_seconds = 180.0
-    estimated_water_liters = 45.0  # (3 minutes * ~15L/min standard)
-    
-    log.info(f"PIR Dropped! Tracked {shower_duration_seconds/60:.1f} minute shower. Estimated {estimated_water_liters}L drawn.")
-    
-    try:
-        resp = requests.post(API_URL, headers=auth_headers(), timeout=5, json={
-            "duration_seconds": shower_duration_seconds,
-            "estimated_liters": estimated_water_liters
-        })
-        if resp.status_code >= 400:
-            log.warning(f"API rejected event: HTTP {resp.status_code} {resp.text[:120]}")
-    except Exception as e:
-        log.warning("Could not reach API. Edge offline?")
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--simulate", action="store_true")
+    args = p.parse_args()
+    poster = EventPoster(API_URL, "shower")
+    lpm = env_float("SHOWER_LPM", 9.0)
+
+    if simulate_requested(args.simulate):
+        report(poster, 180.0, lpm)
+        return
+
+    pin = env_int("PIR_GPIO", 27)
+    pir = digital_input(pin, pull_up=False)   # HC-SR501 drives the line high on motion
+    session = ShowerSession(env_float("SHOWER_IDLE_S", 90), env_float("SHOWER_MIN_S", 30))
+    log.info("PIR on GPIO%d", pin)
+    while True:
+        duration = session.update(bool(pir.value), time.monotonic())
+        if duration is not None:
+            report(poster, duration, lpm)
+        time.sleep(0.5)
+
 
 if __name__ == "__main__":
     main()

@@ -86,36 +86,8 @@ def read_stdin():
 
 
 def read_evdev(path: str):
-    from evdev import InputDevice, categorize, ecodes  # Linux only (pip install evdev)
-
-    chars = {**{f"KEY_{c}": c.lower() for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"},
-             **{f"KEY_{d}": d for d in "0123456789"},
-             "KEY_MINUS": "-", "KEY_DOT": ".", "KEY_SLASH": "/", "KEY_SPACE": " ",
-             "KEY_EQUAL": "=", "KEY_COMMA": ",", "KEY_SEMICOLON": ";"}
-    shifted = {"KEY_MINUS": "_", "KEY_SLASH": "?", "KEY_EQUAL": "+", "KEY_SEMICOLON": ":"}
-    dev = InputDevice(path)
-    dev.grab()  # scans go only to us, not to the focused window
-    log.info(f"Reading scanner {dev.name} ({path})")
-    buf, shift = [], False
-    try:
-        for event in dev.read_loop():
-            if event.type != ecodes.EV_KEY:
-                continue
-            key = categorize(event)
-            name = key.keycode if isinstance(key.keycode, str) else key.keycode[0]
-            if name in ("KEY_LEFTSHIFT", "KEY_RIGHTSHIFT"):
-                shift = key.keystate != key.key_up
-                continue
-            if key.keystate != key.key_down:
-                continue
-            if name in ("KEY_ENTER", "KEY_KPENTER"):
-                yield "".join(buf)
-                buf = []
-            elif name in chars:
-                c = shifted.get(name) if shift and name in shifted else chars[name]
-                buf.append(c.upper() if shift and c.isalpha() else c)
-    finally:
-        dev.ungrab()
+    from tag_readers import read_hid
+    return read_hid(path)
 
 
 def main():

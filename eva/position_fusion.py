@@ -29,7 +29,7 @@ _lock = threading.Lock()
 def on_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload.decode())
-        crew_id = data.get("crew_id", "EV1")
+        crew_id = str(data.get("crew_id") or os.getenv("CREW_ID", "ev1")).lower()
         with _lock:
             if "uwb" in msg.topic:
                 _uwb_frames[crew_id] = data

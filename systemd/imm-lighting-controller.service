@@ -9,9 +9,6 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/imm-os-edge
 # Shared node config + secrets (see edge.env.example); optional
 EnvironmentFile=-/etc/imm-os/edge.env
-# Point at the habitat MQTT broker the ECLSS API publishes to
-Environment="MQTT_HOST=localhost"
-Environment="MQTT_PORT=1883"
 ExecStart=/usr/bin/python3 eclss/lighting_controller.py --listen
 Restart=always
 RestartSec=10

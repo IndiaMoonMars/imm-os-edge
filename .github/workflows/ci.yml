@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        # hardware libraries (gpiozero, smbus2, ...) are imported lazily and not needed for the logic tests
+        run: pip install pytest paho-mqtt==1.6.1 requests
+      - name: Compile all scripts
+        run: python -m compileall -q core eclss eva sensor_drivers simulator inventory
+      - name: Run tests
+        run: pytest -q tests

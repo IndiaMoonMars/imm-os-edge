@@ -1,0 +1,22 @@
+[Unit]
+Description=IMM-OS EVA daemon (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The user needs the gpio, i2c, spi, dialout and input groups (see real-sensors/README.md)
+User=ubuntu
+WorkingDirectory=/home/ubuntu/imm-os-edge
+# Node config + secrets (see edge.env.example)
+EnvironmentFile=-/etc/imm-os/edge.env
+Environment="IMM_SPOOL_DIR=/var/lib/imm-os/spool"
+StateDirectory=imm-os
+# %i is the script name without .py, e.g. water_monitor
+ExecStart=/usr/bin/python3 eva/%i.py
+Restart=always
+RestartSec=10
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -2,30 +2,83 @@
 import time
 import argparse
 import logging
-import random
 import os
 import json
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [lighting] %(message)s")
 log = logging.getLogger(__name__)
 
-# HARDWARE MOCK (PCA9685 I2C)
-class PCA9685_Mock:
-    def set_pwm(self, channel, on, off):
-        log.debug(f"I2C Cmd: CH{channel} ON={on} OFF={off}")
+# ── Tunable-white LED output (PCA9685 PWM board) ────────────────────
+# Each zone has two constant-current/MOSFET-driven LED channels: a warm-white strip
+# (~2700 K) and a cool-white strip (~6500 K). Mixing their duty cycles sets the colour
+# temperature; the sum sets brightness. Zone → PCA9685 channels comes from
+#   LIGHT_ZONES="core:0,1;galley:2,3;sleep:4,5"     (warm channel, cool channel)
+WARM_K, COOL_K = 2700, 6500
+GAMMA = 2.2  # perceived brightness is roughly linear in duty^(1/2.2)
 
-pwm = PCA9685_Mock()
+
+def mix(brightness: int, kelvin: int):
+    """(warm, cool) duty cycles 0..1 for a brightness 0–100 % and colour temperature."""
+    b = (max(0, min(100, brightness)) / 100.0) ** GAMMA
+    cool = (max(WARM_K, min(COOL_K, kelvin)) - WARM_K) / (COOL_K - WARM_K)
+    return round(b * (1 - cool), 4), round(b * cool, 4)
+
+
+def parse_zones(spec: str) -> dict:
+    zones = {}
+    for part in filter(None, (x.strip() for x in (spec or "").split(";"))):
+        name, chans = part.split(":")
+        warm, cool = (int(c) for c in chans.split(","))
+        zones[name.strip()] = (warm, cool)
+    return zones
+
+
+class PCA9685Output:
+    def __init__(self, zones: dict):
+        import board
+        import busio
+        from adafruit_pca9685 import PCA9685
+        self.pca = PCA9685(busio.I2C(board.SCL, board.SDA), address=int(os.getenv("LIGHT_PCA_ADDRESS", "0x40"), 16))
+        self.pca.frequency = int(os.getenv("LIGHT_PWM_HZ", "1000"))  # above visible flicker
+        self.zones = zones
+
+    def apply(self, zone: str, warm: float, cool: float) -> None:
+        targets = self.zones.values() if zone == "all_zones" else [self.zones[zone]] if zone in self.zones else []
+        if not targets:
+            log.warning(f"Zone '{zone}' has no LED channels in LIGHT_ZONES; ignored")
+        for w_ch, c_ch in targets:
+            self.pca.channels[w_ch].duty_cycle = int(warm * 0xFFFF)
+            self.pca.channels[c_ch].duty_cycle = int(cool * 0xFFFF)
+
+
+class LogOutput:
+    def apply(self, zone: str, warm: float, cool: float) -> None:
+        log.debug(f"{zone}: warm {warm:.3f} cool {cool:.3f} (no LED hardware)")
+
+
+def make_output():
+    zones = parse_zones(os.getenv("LIGHT_ZONES", ""))
+    if os.getenv("IMM_SIMULATE", "false").lower() == "true" or not zones:
+        if not zones:
+            log.warning("LIGHT_ZONES not set: logging lighting commands only")
+        return LogOutput()
+    return PCA9685Output(zones)
+
+
+output = None
+
 
 def set_lighting(zone: str, brightness: int, kelvin: int):
-    # WS2812B logical translation based on color temperature (Kelvin)
-    # 2000K (Warm) -> 6500K (Daylight)
+    global output
+    if output is None:
+        output = make_output()
     brightness = max(0, min(100, brightness))
     kelvin = max(2000, min(6500, kelvin))
-    
-    # Send simulated I2C commands
-    log.info(f"Targeting {zone} -> Brightness: {brightness}%, Color Temp: {kelvin}K")
-    pwm.set_pwm(0, 0, int(40.95 * brightness))
-    
+    warm, cool = mix(brightness, kelvin)
+    log.info(f"Targeting {zone} -> Brightness: {brightness}%, Color Temp: {kelvin}K (warm {warm:.2f}, cool {cool:.2f})")
+    output.apply(zone, warm, cool)
+
+
 def circadian_loop():
     log.info("Starting Auto-Circadian Loop (12 Hour compression)")
     # Simulation: compress 12 hours into 60 seconds
