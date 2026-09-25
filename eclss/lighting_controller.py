@@ -3,6 +3,8 @@ import time
 import argparse
 import logging
 import random
+import os
+import json
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [lighting] %(message)s")
 log = logging.getLogger(__name__)
@@ -39,15 +41,54 @@ def circadian_loop():
         set_lighting("all_zones", 80, temp)
         time.sleep(12)
 
+# Commands published (retained, QoS 1) by the ECLSS API on PUT /api/v1/eclss/lighting/{zone}
+LIGHTING_TOPIC = "habitat/control/lighting/+"
+
+
+def on_lighting_message(client, userdata, msg):
+    zone = msg.topic.rsplit("/", 1)[-1]
+    try:
+        cmd = json.loads(msg.payload)
+        set_lighting(zone, int(cmd["brightness"]), int(cmd["kelvin"]))
+    except (ValueError, KeyError, TypeError) as e:
+        log.error(f"Ignoring malformed lighting command on {msg.topic}: {e}")
+
+
+def listen_loop():
+    import paho.mqtt.client as mqtt
+
+    host = os.getenv("MQTT_HOST", "localhost")
+    port = int(os.getenv("MQTT_PORT", "1883"))
+
+    def on_connect(client, userdata, flags, rc):
+        if rc != 0:
+            log.error(f"MQTT connect failed rc={rc}")
+            return
+        # (Re)subscribe on every connect; retained messages replay current state
+        client.subscribe(LIGHTING_TOPIC, qos=1)
+        log.info(f"Listening for lighting commands on {LIGHTING_TOPIC} @ {host}:{port}")
+
+    client = mqtt.Client(client_id=f"imm-lighting-{os.uname().nodename}", clean_session=True)
+    client.on_connect = on_connect
+    client.on_message = on_lighting_message
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+    client.connect_async(host, port, keepalive=60)
+    client.loop_forever(retry_first_connection=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--zone", type=str, default="core")
     parser.add_argument("--brightness", type=int, default=80)
     parser.add_argument("--kelvin", type=int, default=5000)
     parser.add_argument("--auto", action="store_true")
+    parser.add_argument("--listen", action="store_true",
+                        help="Subscribe to ECLSS API lighting commands over MQTT")
     args = parser.parse_args()
 
-    if args.auto:
+    if args.listen:
+        listen_loop()
+    elif args.auto:
         circadian_loop()
     else:
         set_lighting(args.zone, args.brightness, args.kelvin)

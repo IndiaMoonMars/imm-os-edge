@@ -1,0 +1,19 @@
+[Unit]
+Description=IMM-OS ECLSS Lighting Controller (MQTT listener)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/imm-os-edge
+# Point at the habitat MQTT broker the ECLSS API publishes to
+Environment="MQTT_HOST=localhost"
+Environment="MQTT_PORT=1883"
+ExecStart=/usr/bin/python3 eclss/lighting_controller.py --listen
+Restart=always
+RestartSec=10
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

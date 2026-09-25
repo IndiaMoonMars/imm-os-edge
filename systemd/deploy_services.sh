@@ -9,8 +9,9 @@ fi
 
 echo "Deploying IMM-OS sensor pipelines..."
 
-# Copy template to systemd config folder
+# Copy templates to systemd config folder
 cp imm-sensor-pipeline@.service /etc/systemd/system/
+cp imm-lighting-controller.service /etc/systemd/system/
 
 systemctl daemon-reload
 
@@ -32,6 +33,10 @@ do
     systemctl start "imm-sensor-pipeline@$s"
 done
 
+echo "Starting ECLSS lighting controller (MQTT listener)..."
+systemctl enable imm-lighting-controller.service
+systemctl start imm-lighting-controller.service
+
 echo "Deployment complete! Checking status:"
 sleep 2
-systemctl --no-pager status imm-sensor-pipeline@*
+systemctl --no-pager status imm-sensor-pipeline@* imm-lighting-controller.service
