@@ -3,6 +3,7 @@
 
 import argparse, sys, time, json, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from mqtt_publisher import MODES, make_publisher  # noqa: E402
 ZONES = {"Zone_A": 0, "Zone_B": 1, "Zone_C": 2}
 
 def read_loop(publish_fn):
@@ -30,14 +31,9 @@ def read_loop(publish_fn):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    parser.add_argument("--mode", choices=MODES, default="stdout")
     args = parser.parse_args()
-    if args.mode == "mqtt":
-        from mqtt_publisher import create_client, publish as mp
-        c = create_client()
-        publish_fn = lambda p, t: mp(c, t, p)
-    else:
-        publish_fn = lambda p, t: print(json.dumps(p), flush=True)
+    publish_fn = make_publisher(args.mode, None)
     read_loop(publish_fn)
 
 if __name__ == "__main__":

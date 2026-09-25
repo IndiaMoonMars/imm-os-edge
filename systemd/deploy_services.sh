@@ -15,15 +15,23 @@ cp imm-lighting-controller.service /etc/systemd/system/
 
 systemctl daemon-reload
 
-sensors=(
-    "bme280_driver.py"
-    "scd40_driver.py"
-    "mq7_uart_bridge.py"
-    "biosensor_driver.py"
-    "ecg_driver.py"
-    "lux_driver.py"
-    "power_driver.py"
-)
+# Default: every habitat-node driver. To deploy only the sensors fitted to this
+# node, pass them as arguments:  sudo ./deploy_services.sh bme280_driver.py scd40_driver.py
+# (Jetson nodes: sudo ./deploy_services.sh jetson_driver.py)
+if [ "$#" -gt 0 ]; then
+    sensors=("$@")
+else
+    sensors=(
+        "bme280_driver.py"
+        "scd40_driver.py"
+        "o2_driver.py"
+        "mq7_uart_bridge.py"
+        "biosensor_driver.py"
+        "ecg_driver.py"
+        "lux_driver.py"
+        "power_driver.py"
+    )
+fi
 
 # Enable and start each pipeline instance
 for s in "${sensors[@]}"
