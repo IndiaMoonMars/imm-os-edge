@@ -60,18 +60,20 @@ class Sensor:
     args: List[str] = field(default_factory=list)
     tip: str = ""                             # sanity check against a reference
     simulated: bool = False                   # the MCC simulator fakes this sensor today
+    count: Optional[int] = None               # readings to wait for (default: --count)
+    chip_id: Optional[Tuple[int, int, Dict[int, str]]] = None   # (address, register, {value: name}) to identify the part
 
 
 def sensors() -> Dict[str, Sensor]:
     return {
         "bme280": Sensor("sensor_drivers/bme280_driver.py", {"temp": (-10, 60), "hum": (0, 100), "pres": (300, 1100)},
-                         i2c=[_addr("BME280_ADDRESS", 0x76)],
-                         simulated=True,
+                         i2c=[_addr("BME280_ADDRESS", 0x76)], simulated=True,
+                         chip_id=(_addr("BME280_ADDRESS", 0x76), 0xD0, {0x60: "BME280", 0x58: "BMP280 (no humidity!)"}),
                          tip="compare temperature with a room thermometer (±1 °C), pressure with a weather site (±2 hPa)"),
         "scd40": Sensor("sensor_drivers/scd40_driver.py", {"co2_ppm": (250, 5000), "temp": (-10, 60), "hum": (0, 100)},
                         i2c=[0x62], timeout_s=30, simulated=True,
                         tip="fresh air reads ~420 ppm; breathe near it and CO₂ should jump within 10 s"),
-        "o2": Sensor("sensor_drivers/o2_driver.py", {"o2_pct": (19.0, 23.0)}, i2c=[_addr("O2_ADS_ADDRESS", 0x48)],
+        "o2": Sensor("sensor_drivers/o2_driver.py", {"o2_pct": (19.0, 23.0)}, i2c=[_addr("O2_ADS_ADDRESS", 0x49)],
                      simulated=True,
                      tip="needs O2_CAL_MV (run the driver with --calibrate in fresh air first); air is 20.9 %"),
         "ina219": Sensor("sensor_drivers/power_driver.py", {"voltage_v": (0, 26), "current_ma": (-3200, 3200)},
@@ -83,8 +85,9 @@ def sensors() -> Dict[str, Sensor]:
         "max30100": Sensor("sensor_drivers/biosensor_driver.py", {"hr_bpm": (35, 200), "spo2_pct": (85, 100)},
                            i2c=[0x57], timeout_s=40,
                            tip="nothing is published until a finger rests on it; hold still ~10 s; compare with a pulse oximeter"),
-        "mq7": Sensor("sensor_drivers/mq7_uart_bridge.py", {"co_ppm": (0, 1000)}, uart=True, timeout_s=30,
-                      tip="MQ-7 needs 24–48 h burn-in before ppm values mean anything"),
+        "mq7": Sensor("sensor_drivers/mq7_uart_bridge.py", {"co_ppm": (0, 1000)}, uart=True, timeout_s=320, count=1,
+                      tip="the STM32 reports once per 150 s heater cycle; calibrate in clean air with "
+                          "mq7_uart_bridge.py --calibrate; readings mean little before 24–48 h burn-in"),
         "sysmon": Sensor("sensor_drivers/sysmon_driver.py", {"cpu_temp": (0, 85), "undervolt": (0, 0), "throttled": (0, 0)},
                          args=["--interval", "2"], timeout_s=15, simulated=True,
                          tip="undervolt=1 means the power supply is too weak (Pi 5: use the 27 W 5 V/5 A supply)"),
@@ -221,8 +224,19 @@ def board_report(r: Report, want_i2c: List[int] = None, want_uart: bool = False,
 
 # ── driver run ─────────────────────────────────────────────────────
 
-def run_driver(cmd: List[str], env: dict, count: int, timeout_s: float) -> Tuple[List[dict], List[str]]:
-    """Run a driver in stdout mode until `count` JSON readings arrive or the timeout; returns (readings, errors)."""
+def identify(bus, address: int, register: int, names: Dict[int, str]) -> Tuple[Optional[int], str]:
+    try:
+        value = bus.read_byte_data(address, register)
+    except OSError as e:
+        return None, f"cannot read ID register 0x{register:02x}: {e}"
+    return value, names.get(value, f"unknown part (ID 0x{value:02x})")
+
+
+def run_driver(cmd: List[str], env: dict, count: int, timeout_s: float, notes: List[str] = None) -> Tuple[List[dict], List[str]]:
+    """
+    Run a driver in stdout mode until `count` JSON readings arrive or the timeout.
+    Returns (readings, errors); stderr lines that are {"info": ...} go to `notes` instead.
+    """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, cwd=ROOT)
     readings, errors = [], []
     lines: "queue.Queue[Optional[str]]" = queue.Queue()
@@ -262,6 +276,10 @@ def run_driver(cmd: List[str], env: dict, count: int, timeout_s: float) -> Tuple
     for line in err.splitlines():
         try:
             msg = json.loads(line)
+            if isinstance(msg, dict) and "info" in msg and "error" not in msg:
+                if notes is not None:
+                    notes.append(str(msg["info"]))
+                continue
             errors.append(msg.get("error", line) if isinstance(msg, dict) else line)
         except ValueError:
             if line.strip():
@@ -290,9 +308,25 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
         print(f"\n{name}: fix the bus problem above first.")
         return 1
 
-    print(f"── Running {sensor.driver} (stdout only, nothing is published) for {count} readings…")
+    if sensor.chip_id:
+        value, part = identify(open_i2c(), *sensor.chip_id)
+        if value is None or value not in sensor.chip_id[2] or "!" in part:
+            r.fail(f"chip: {part}")
+        else:
+            r.ok(f"chip: {part}")
+    ads = {k: _addr(k, d) for k, d in (("ECG_ADS_ADDRESS", 0x48), ("O2_ADS_ADDRESS", 0x49))}
+    if name in ("ecg", "o2") and ads["ECG_ADS_ADDRESS"] == ads["O2_ADS_ADDRESS"]:
+        r.warn("ECG and O2 share one ADS1115: don't run both drivers on this node (use a second ADS1115 at 0x49)")
+
+    count = sensor.count or count
+    wait = f" (up to {sensor.timeout_s:g} s)" if sensor.timeout_s > 60 else ""
+    print(f"── Running {sensor.driver} (stdout only, nothing is published) for {count} reading(s){wait}…")
     env = dict(os.environ)
-    readings, errors = run_driver([python, sensor.driver, "--mode", "stdout", *sensor.args], env, count, sensor.timeout_s)
+    notes: List[str] = []
+    readings, errors = run_driver([python, sensor.driver, "--mode", "stdout", *sensor.args], env, count,
+                                  sensor.timeout_s, notes)
+    for n in notes[-3:]:
+        print(f"  · {n}")
     for e in errors[:5]:
         r.fail(f"driver: {e}")
     if not readings:

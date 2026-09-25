@@ -12,7 +12,7 @@ def read_loop(publish_fn):
         from adafruit_ads1x15.analog_in import AnalogIn
         from hw import i2c_bus
         i2c = i2c_bus()
-        ads = ADS.ADS1115(i2c)
+        ads = ADS.ADS1115(i2c, address=int(os.getenv("ECG_ADS_ADDRESS", "0x48"), 16))
         ads.data_rate = 860
         chan = AnalogIn(ads, ADS.P0)
     except Exception as e:

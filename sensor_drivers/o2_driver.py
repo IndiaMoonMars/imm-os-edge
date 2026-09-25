@@ -19,7 +19,9 @@ from mqtt_publisher import MODES, make_publisher  # noqa: E402
 
 MQTT_TOPIC = "habitat/sensors/o2/zone1"
 AIR_O2_PCT = 20.9
-ADS_ADDRESS = int(os.getenv("O2_ADS_ADDRESS", "0x48"), 16)   # shared with the ECG ADS1115
+# Its own ADS1115 at 0x49 (ADDR pin → VDD): the ECG driver owns the one at 0x48, and two
+# processes reconfiguring one chip would read each other's channel.
+ADS_ADDRESS = int(os.getenv("O2_ADS_ADDRESS", "0x49"), 16)
 SAMPLES = 16  # averaged per reading; the cell output is noisy at µV level
 
 

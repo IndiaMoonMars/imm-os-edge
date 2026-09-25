@@ -46,7 +46,7 @@ payload, or the validator rejects the reading.
 | `bme280` | `temp` °C, `hum` %, `pres` hPa | `sensor_drivers/bme280_driver.py` |
 | `scd40` | `co2_ppm`, `temp`, `hum` | `scd40_driver.py` |
 | `o2` | `o2_pct` | `o2_driver.py` (needs `O2_CAL_MV`) |
-| `mq7` | `co_ppm` | `mq7_uart_bridge.py` (STM32 over UART) |
+| `mq7` | `co_ppm` | `mq7_uart_bridge.py` (STM32 over UART, [firmware](../firmware/stm32-mq7/README.md)) |
 | `max30100` | `hr_bpm`, `spo2_pct` | `biosensor_driver.py` |
 | `ecg_ad8232` | `voltage` | `ecg_driver.py` |
 | `tsl2561` | `lux` (per zone) | `lux_driver.py` |
@@ -64,7 +64,8 @@ The schema lives in `imm-os-backend/services/telemetry_schema.py`.
 1. **Set up the node** with `scripts/setup-node.sh` (see the top-level README): packages,
    interfaces, `/etc/imm-os/edge.env` (`IMM_NODE_ID`, `IMM_ZONE`, MQTT password, CA),
    calibration file and services, then connectivity checks.
-2. **Bench-test with the bring-up tool**. It checks the board and bus (power supply,
+2. **Bench-test with the bring-up tool** (wiring and order for every sensor:
+   [BENCH.md](BENCH.md)). It checks the board and bus (power supply,
    I2C address, UART, serial console), runs the real driver in stdout mode (nothing is
    sent) and checks every value against a plausible range:
    ```bash
