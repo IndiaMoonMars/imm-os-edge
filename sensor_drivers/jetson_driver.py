@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 IMM-OS Jetson Driver — on-board CPU/GPU temperature and total power (Jetson Orin / Xavier).
+Optional: the compute node is a Raspberry Pi 5 (sysmon_driver.py); keep this for a Jetson added later.
 Modes: stdout | mqtt | both
 
 Reads Linux sysfs only (no extra packages):

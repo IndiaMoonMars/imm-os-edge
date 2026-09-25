@@ -6,6 +6,12 @@ IMM_SIMULATE=true) to run the old synthetic behaviour on a laptop or in CI.
 
 GPIO uses gpiozero, which works on Raspberry Pi 4 and 5 (lgpio backend); I2C uses
 smbus2; serial ports use pyserial. Imports are lazy so --simulate needs none of them.
+
+Raspberry Pi 5 notes (the RP1 I/O chip changed a few things):
+  - Adafruit drivers get their bus from i2c_bus() (by bus number), not `import board`:
+    on a Pi 5 `board` needs the libgpiod Python bindings, which we don't use.
+  - The header UART (GPIO14/15) is /dev/ttyAMA0 on a Pi 5; /dev/serial0 points at the
+    separate debug connector there. default_uart() picks the right one.
 """
 import json
 import logging
@@ -27,6 +33,44 @@ def env_int(name: str, default: int) -> int:
 
 def env_float(name: str, default: float) -> float:
     return float(os.getenv(name, str(default)))
+
+
+# ── Board, I2C, UART ──────────────────────────────────────────────
+
+MODEL_FILE = "/proc/device-tree/model"
+
+
+def board_model(path: str = MODEL_FILE) -> str:
+    """e.g. 'Raspberry Pi 5 Model B Rev 1.0'; '' when unknown."""
+    try:
+        return Path(path).read_bytes().rstrip(b"\0").decode(errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def is_pi5(model: str = None) -> bool:
+    return "Raspberry Pi 5" in (board_model() if model is None else model)
+
+
+def i2c_bus_number() -> int:
+    return env_int("I2C_BUS", 1)
+
+
+def i2c_bus():
+    """A busio-compatible I2C object for Adafruit drivers, opened by bus number (Pi 4 and 5)."""
+    from adafruit_extended_bus import ExtendedI2C
+    return ExtendedI2C(i2c_bus_number())
+
+
+def default_uart(model: str = None, exists=os.path.exists) -> str:
+    """Serial device wired to header pins 8 (TX) / 10 (RX)."""
+    if is_pi5(model) and exists("/dev/ttyAMA0"):
+        return "/dev/ttyAMA0"
+    return "/dev/serial0"
+
+
+def uart_port(env_name: str) -> str:
+    return os.getenv(env_name) or default_uart()
 
 
 # ── GPIO ──────────────────────────────────────────────────────────

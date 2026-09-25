@@ -24,11 +24,10 @@ SAMPLES = 16  # averaged per reading; the cell output is noisy at µV level
 
 
 def open_channel():
-    import board
-    import busio
     import adafruit_ads1x15.ads1115 as ADS
     from adafruit_ads1x15.analog_in import AnalogIn
-    ads = ADS.ADS1115(busio.I2C(board.SCL, board.SDA), address=ADS_ADDRESS)
+    from hw import i2c_bus
+    ads = ADS.ADS1115(i2c_bus(), address=ADS_ADDRESS)
     ads.gain = 16  # ±0.256 V full scale: galvanic cells output ~10–60 mV
     return AnalogIn(ads, ADS.P1)
 

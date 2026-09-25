@@ -8,9 +8,9 @@ MQTT_TOPIC = "habitat/sensors/scd40/zone1"
 
 def read_loop(publish_fn):
     try:
-        import board
         import adafruit_scd4x
-        i2c = board.I2C()
+        from hw import i2c_bus
+        i2c = i2c_bus()
         scd40 = adafruit_scd4x.SCD4X(i2c)
         scd40.start_periodic_measurement()
     except Exception as e:

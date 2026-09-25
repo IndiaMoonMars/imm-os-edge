@@ -8,10 +8,10 @@ MQTT_TOPIC = "habitat/sensors/ecg_ad8232/zone1"
 
 def read_loop(publish_fn):
     try:
-        import board, busio
         import adafruit_ads1x15.ads1115 as ADS
         from adafruit_ads1x15.analog_in import AnalogIn
-        i2c = busio.I2C(board.SCL, board.SDA)
+        from hw import i2c_bus
+        i2c = i2c_bus()
         ads = ADS.ADS1115(i2c)
         ads.data_rate = 860
         chan = AnalogIn(ads, ADS.P0)

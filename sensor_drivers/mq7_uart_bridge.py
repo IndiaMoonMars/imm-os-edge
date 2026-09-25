@@ -3,15 +3,15 @@
 
 import argparse, sys, time, json, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from hw import uart_port  # noqa: E402
 from mqtt_publisher import MODES, make_publisher  # noqa: E402
 MQTT_TOPIC = "habitat/sensors/mq7/zone1"
-SERIAL_PORT = "/dev/serial0"
 BAUD_RATE = 115200
 
 def read_loop(publish_fn):
     try:
         import serial
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2.0)
+        ser = serial.Serial(uart_port("MQ7_PORT"), BAUD_RATE, timeout=2.0)
         ser.flushInput()
     except Exception as e:
         print(json.dumps({"error": f"UART init: {e}"}), file=sys.stderr); sys.exit(1)

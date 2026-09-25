@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# IMM-OS edge node setup — turns a fresh Raspberry Pi OS (or Jetson) install into a
-# working IMM-OS node. Safe to re-run: every step checks before it changes anything.
+# IMM-OS edge node setup — turns a fresh Raspberry Pi OS (Pi 4 or Pi 5, 64-bit) install
+# into a working IMM-OS node. Safe to re-run: every step checks before it changes anything.
 #
 #   git clone https://github.com/IndiaMoonMars/imm-os-edge.git && cd imm-os-edge
 #   scp <mcc>:imm-os-infra/mosquitto/certs/ca.crt /tmp/ca.crt
@@ -24,6 +24,8 @@
 #   --mcc-name NAME      name in the MCC's TLS certificate (default imm.local)
 #   --ca FILE            the MCC's MQTT CA certificate (required on first setup)
 #   --sensors "…"        sensor_drivers/ to run, e.g. "bme280_driver.py scd40_driver.py"
+#                        (sysmon_driver.py, the node health report, is always added)
+#   --no-sysmon          don't add sysmon_driver.py
 #   --eclss "…"          eclss/ daemons, e.g. "water_monitor eclss_pid"
 #   --eva "…"            eva/ daemons, e.g. "gps_driver uwb_driver position_fusion"
 #   --crew-id ID         wearer of this EVA kit (EVA nodes)
@@ -43,7 +45,7 @@ HOSTS_FILE="${IMM_HOSTS_FILE:-/etc/hosts}"
 NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID=""
 SENSORS="__unset__" ECLSS="__unset__" EVA="__unset__"
 SVC_USER="${SUDO_USER:-}"
-SKIP_APT=0 SKIP_IF=0 NO_SERVICES=0 CHECK_ONLY=0 DRY=0
+SKIP_APT=0 SKIP_IF=0 NO_SERVICES=0 CHECK_ONLY=0 DRY=0 NO_SYSMON=0
 REBOOT_NEEDED=0
 
 die()  { echo "✗ $*" >&2; exit 1; }
@@ -65,17 +67,21 @@ while [ $# -gt 0 ]; do
         --crew-id) CREW_ID="$2"; shift 2 ;;
         --user) SVC_USER="$2"; shift 2 ;;
         --skip-apt) SKIP_APT=1; shift ;;
+        --no-sysmon) NO_SYSMON=1; shift ;;
         --skip-interfaces) SKIP_IF=1; shift ;;
         --no-services) NO_SERVICES=1; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
         --dry-run) DRY=1; shift ;;
-        -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
 done
 
 [ "$DRY" = 1 ] || [ "$EUID" -eq 0 ] || die "run with sudo"
 envget() { python3 "$REPO/tools/envfile.py" --get "$ENV_FILE" "$1" 2>/dev/null || true; }
+MODEL=$(tr -d '\0' < "${IMM_MODEL_FILE:-/proc/device-tree/model}" 2>/dev/null || true)
+IS_PI5=0; case "$MODEL" in *"Raspberry Pi 5"*) IS_PI5=1 ;; esac
+BOOT_CONFIG="${IMM_BOOT_CONFIG:-/boot/firmware/config.txt}"; [ -f "$BOOT_CONFIG" ] || BOOT_CONFIG=/boot/config.txt
 
 # ── Health checks ─────────────────────────────────────────────────
 FAILS=0
@@ -109,6 +115,14 @@ chk_token() {
            --data-urlencode client_secret="$secret" "$url") || { echo "Keycloak unreachable at $url"; return 1; }
     case "$body" in *access_token*) echo "edge token issued" ;; *) echo "no token: ${body:0:100}"; return 1 ;; esac
 }
+chk_power() {
+    command -v vcgencmd >/dev/null || { echo "vcgencmd not available (not a Raspberry Pi?)"; return 0; }
+    local t; t=$(vcgencmd get_throttled 2>/dev/null | sed -n 's/^throttled=//p')
+    [ -n "$t" ] || { echo "cannot read throttle state (service user needs the video group)"; return 0; }
+    if (( t & 0x1 )); then echo "UNDER-VOLTAGE now ($t): use the official supply (Pi 5: 27 W, 5 V/5 A)"; return 1; fi
+    if (( t & 0x10000 )); then echo "under-voltage occurred since boot ($t): check supply and cable"; return 1; fi
+    echo "supply OK ($t)"
+}
 chk_i2c() {
     command -v i2cdetect >/dev/null && [ -e /dev/i2c-1 ] || { echo "I2C bus 1 not available (reboot after setup?)"; return 1; }
     local found names=""
@@ -127,6 +141,8 @@ chk_i2c() {
 run_checks() {
     step "Health checks"
     local host; host=$(envget MQTT_HOST); host=${host:-$MCC_NAME}
+    echo "  · board: ${MODEL:-unknown}"
+    check "power supply" chk_power
     check "clock synchronised" chk_time
     check "$host resolves" chk_name "$host"
     check "MQTT TLS port" chk_port "$host" "$(envget MQTT_PORT)"
@@ -140,6 +156,7 @@ run_checks() {
     fi
     echo
     if [ "$FAILS" -eq 0 ]; then echo "All checks passed."; else echo "$FAILS check(s) failed — see above."; fi
+    echo "Bench-test each sensor with: sudo $REPO/.venv/bin/python $REPO/tools/bringup.py <sensor>   (--list)"
     return "$FAILS"
 }
 
@@ -196,28 +213,33 @@ fi
 if [ "$SKIP_IF" = 0 ]; then
     step "Interfaces"
     if command -v raspi-config >/dev/null; then
-        before=$(md5sum /boot/firmware/config.txt /boot/config.txt 2>/dev/null || true)
+        before=$(md5sum "$BOOT_CONFIG" 2>/dev/null || true)
         run raspi-config nonint do_i2c 0
         run raspi-config nonint do_spi 0
         run raspi-config nonint do_serial_hw 0      # UART on (GPS, MQ-7 STM32)
         run raspi-config nonint do_serial_cons 1    # login console off the UART
         run raspi-config nonint do_onewire 0        # DS18B20 on GPIO4
-        after=$(md5sum /boot/firmware/config.txt /boot/config.txt 2>/dev/null || true)
+        # Pi 5: the header UART (GPIO14/15) is UART0 → /dev/ttyAMA0; make sure it is on
+        # (/dev/serial0 is the separate debug connector there). core/hw.py picks ttyAMA0.
+        if [ "$IS_PI5" = 1 ] && ! grep -qE '^dtparam=uart0(=on)?$' "$BOOT_CONFIG"; then
+            if [ "$DRY" = 1 ]; then echo "  + append dtparam=uart0=on to $BOOT_CONFIG"; else printf '\n[all]\ndtparam=uart0=on\n' >> "$BOOT_CONFIG"; fi
+        fi
+        after=$(md5sum "$BOOT_CONFIG" 2>/dev/null || true)
         [ "$before" = "$after" ] || REBOOT_NEEDED=1
-        ok "I2C, SPI, UART and 1-Wire enabled"
+        ok "I2C, SPI, UART and 1-Wire enabled${MODEL:+ on $MODEL}"
     else
-        warn "raspi-config not found (Jetson/other board): enable I2C/UART with the vendor tool"
+        warn "raspi-config not found (not Raspberry Pi OS?): enable I2C/SPI/UART with the board's own tool"
     fi
 fi
 
 # ── 3. User groups ────────────────────────────────────────────────
 step "Service user $SVC_USER"
-for g in gpio i2c spi dialout input; do
+for g in gpio i2c spi dialout input video; do   # video: vcgencmd (power/throttle state)
     if getent group "$g" >/dev/null; then
         if id -nG "$SVC_USER" | tr ' ' '\n' | grep -qx "$g"; then :; else run usermod -aG "$g" "$SVC_USER"; REBOOT_NEEDED=1; fi
     fi
 done
-groups_now=$(id -nG "$SVC_USER" | tr ' ' '\n' | grep -xE 'gpio|i2c|spi|dialout|input' | tr '\n' ' ' || true)
+groups_now=$(id -nG "$SVC_USER" | tr ' ' '\n' | grep -xE 'gpio|i2c|spi|dialout|input|video' | tr '\n' ' ' || true)
 ok "hardware groups: ${groups_now:-none yet (added on this run; active after reboot)}"
 
 # ── 4. Python environment ─────────────────────────────────────────
@@ -248,6 +270,10 @@ updates=(
     "INVENTORY_API_URL=http://$MCC_NAME/inventory"
     "IMM_CALIBRATION_FILE=$CONF_DIR/calibration.yaml"
 )
+if [ "$NO_SYSMON" = 0 ]; then
+    [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
+    case " $SENSORS " in *" sysmon_driver.py "*) ;; *) SENSORS=$(echo "sysmon_driver.py $SENSORS" | xargs) ;; esac
+fi
 [ "$SENSORS" = "__unset__" ] || updates+=("IMM_SENSORS=$SENSORS")
 [ "$ECLSS" = "__unset__" ] || updates+=("IMM_ECLSS_DAEMONS=$ECLSS")
 [ "$EVA" = "__unset__" ] || updates+=("IMM_EVA_DAEMONS=$EVA")

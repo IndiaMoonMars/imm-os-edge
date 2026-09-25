@@ -48,15 +48,14 @@ NODES = [
         "co2_base": 480,
     },
     {
-        "id": "node-jetson",
-        "type": "jetson",
-        "location": "Edge AI Node",
+        "id": "node-compute",
+        "type": "compute",
+        "location": "Compute / Power",
         "zone": "compute",
-        "hardware": "NVIDIA Jetson Orin Nano (8GB)",
+        "hardware": "Raspberry Pi 5 (8GB)",
         # Simulation parameters
-        "cpu_temp_base": 45.0,
-        "gpu_temp_base": 52.0,
-        "power_base": 12.0,
+        "cpu_temp_base": 52.0,
+        "power_base": 6.5,
     },
 ]
 

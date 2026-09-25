@@ -10,7 +10,7 @@ Wiring: M9N TX → Pi RX (GPIO15), RX → TX (GPIO14), 3.3 V, GND; enable the UA
 disable the serial console (raspi-config). The M9N defaults to 38400 baud.
 
 Environment:
-  GPS_PORT=/dev/serial0  GPS_BAUD=38400  CREW_ID=ev1  + MQTT_*
+  GPS_PORT (default: header UART — /dev/ttyAMA0 on a Pi 5, /dev/serial0 otherwise)  GPS_BAUD=38400  CREW_ID=ev1  + MQTT_*
 
   --simulate   drifting fix near the default base location (the old behaviour)
 """
@@ -24,7 +24,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from eva_mqtt import connect, crew_id  # noqa: E402
-from hw import env_int, simulate_requested  # noqa: E402
+from hw import env_int, simulate_requested, uart_port  # noqa: E402
 from positioning import parse_nmea  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [gps_driver] %(message)s")
@@ -59,7 +59,7 @@ class GpsFix:
 
 def sentences_from_serial():
     import serial
-    port, baud = os.getenv("GPS_PORT", "/dev/serial0"), env_int("GPS_BAUD", 38400)
+    port, baud = uart_port("GPS_PORT"), env_int("GPS_BAUD", 38400)
     log.info("Reading NMEA from %s @ %d", port, baud)
     with serial.Serial(port, baud, timeout=2) as ser:
         while True:

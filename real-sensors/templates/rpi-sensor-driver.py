@@ -13,7 +13,7 @@ Supported sensors (add/remove as needed):
   - O2:                   KE-25F (analog via ADC), ME2-O2
 
 Install dependencies:
-  pip install paho-mqtt RPi.GPIO smbus2 bme280 mh-z19
+  pip install paho-mqtt gpiozero lgpio smbus2 bme280 mh-z19   (not RPi.GPIO: it does not work on a Pi 5)
 """
 
 import json

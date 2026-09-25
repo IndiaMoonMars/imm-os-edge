@@ -73,18 +73,16 @@ def read_hid(path: str) -> Iterator[str]:
 
 def read_rc522(poll_s: float = 0.2, rearm_s: float = 2.0) -> Iterator[str]:
     """Yield each card's UID (hex) when presented; the same card again only after it was removed for rearm_s."""
-    from mfrc522 import MFRC522  # pip install mfrc522 (needs SPI enabled)
+    from rc522 import KNOWN_VERSIONS, RC522  # core/rc522.py (spidev; works on Pi 4 and 5)
 
-    reader = MFRC522()
+    reader = RC522(bus=int(os.getenv("RC522_SPI_BUS", "0")), device=int(os.getenv("RC522_SPI_CS", "0")))
+    ver = reader.version()
+    if ver in (0x00, 0xFF):
+        raise SystemExit(f"RC522 not answering on SPI (version register 0x{ver:02X}): check wiring and that SPI is enabled")
+    log.info("Reading RC522 RFID on SPI0 (%s)", KNOWN_VERSIONS.get(ver, f"version 0x{ver:02X}"))
     last_uid, last_seen = None, 0.0
-    log.info("Reading RC522 RFID on SPI0")
     while True:
-        status, _ = reader.MFRC522_Request(reader.PICC_REQIDL)
-        uid = None
-        if status == reader.MI_OK:
-            status, raw = reader.MFRC522_Anticoll()
-            if status == reader.MI_OK:
-                uid = "".join(f"{b:02X}" for b in raw[:4])
+        uid = reader.read_uid()
         now = time.monotonic()
         if uid:
             if uid != last_uid or now - last_seen > rearm_s:

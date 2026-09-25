@@ -10,7 +10,7 @@ badge for every value.
 ## How the data flows
 
 ```
-[sensor_drivers/*.py on RPi / Jetson]        [sensor-sim container]
+[sensor_drivers/*.py on Raspberry Pi 4/5]    [sensor-sim container]
             │  habitat/sensors/<sensor>/<zone>   (MQTT over TLS, user imm-edge)
             ▼
      [Mosquitto] ──▶ [mqtt-kafka-bridge] ──▶ Kafka telemetry.raw
@@ -51,8 +51,9 @@ payload, or the validator rejects the reading.
 | `ecg_ad8232` | `voltage` | `ecg_driver.py` |
 | `tsl2561` | `lux` (per zone) | `lux_driver.py` |
 | `ina219` | `voltage_v`, `current_ma`, `power_mw` | `power_driver.py` |
-| `jetson` | `cpu_temp`, `gpu_temp`, `power_w` | `jetson_driver.py` |
-| `bms` | `battery_pct`, `solar_w` | simulated for now |
+| `sysmon` | `cpu_temp`, `cpu_load`, `mem_pct`, `disk_pct`, `fan_rpm`, `power_w`, `supply_v`, `undervolt`, `throttled` | `sysmon_driver.py` (every node) |
+| `bms` | `battery_pct`, `solar_w` | `bms_driver.py` (MAX17048 gauge + solar INA219) |
+| `jetson` | `cpu_temp`, `gpu_temp`, `power_w` | `jetson_driver.py` (only if a Jetson is added later) |
 
 The schema lives in `imm-os-backend/services/telemetry_schema.py`.
 
@@ -63,10 +64,15 @@ The schema lives in `imm-os-backend/services/telemetry_schema.py`.
 1. **Set up the node** with `scripts/setup-node.sh` (see the top-level README): packages,
    interfaces, `/etc/imm-os/edge.env` (`IMM_NODE_ID`, `IMM_ZONE`, MQTT password, CA),
    calibration file and services, then connectivity checks.
-2. **Bench-test in stdout mode**, which prints readings and sends nothing:
+2. **Bench-test with the bring-up tool**. It checks the board and bus (power supply,
+   I2C address, UART, serial console), runs the real driver in stdout mode (nothing is
+   sent) and checks every value against a plausible range:
    ```bash
-   .venv/bin/python sensor_drivers/bme280_driver.py
+   sudo .venv/bin/python tools/bringup.py            # board + all buses
+   sudo .venv/bin/python tools/bringup.py bme280     # one sensor, 3 readings
+   sudo .venv/bin/python tools/bringup.py --list
    ```
+   Then do its reference check (it prints one, e.g. breathe on the SCD40).
 3. **Go live.** Add the driver to the node's list and re-run setup; the systemd unit
    runs it with `--mode both` (MQTT plus the local encrypted blackbox):
    ```bash
@@ -130,6 +136,26 @@ prefer the drivers in `sensor_drivers/`.
 | Nothing arrives | `docker compose logs mqtt-kafka-bridge` and `mosquitto`; MQTT password and CA on the node |
 | Readings rejected | `docker compose logs telemetry-validator` shows the reason (bad field, wrong topic, clock off by more than 7 days) |
 | Values wrong | Calibration (`O2_CAL_MV`), sensor burn-in (MQ-7 needs 24–48 h) |
+| Driver can't find the device | `tools/bringup.py <sensor>`: shows what answers on I2C and which UART is used |
+| `undervolt` = 1 / random resets | Power supply too weak. Pi 5: the official 27 W (5 V / 5 A) supply |
+
+## Raspberry Pi 5 notes
+
+All drivers run on a Pi 4 or a Pi 5 (64-bit Raspberry Pi OS). The Pi 5's RP1 I/O chip
+changes three things, all handled in the code:
+
+- **GPIO:** `RPi.GPIO` does not work on a Pi 5. GPIO goes through gpiozero/lgpio, and the
+  RC522 RFID reader uses `core/rc522.py` (SPI only, RST tied to 3.3 V) instead of the
+  `mfrc522` package.
+- **I2C for Adafruit drivers:** they open the bus by number (`core/hw.py: i2c_bus()`,
+  `I2C_BUS`) instead of `import board`, which on a Pi 5 needs libgpiod bindings.
+- **UART:** the header UART (GPIO14/15, pins 8/10) is `/dev/ttyAMA0`, enabled with
+  `dtparam=uart0=on` (`setup-node.sh` adds it). `/dev/serial0` is the separate debug
+  connector on a Pi 5. `GPS_PORT` / `MQ7_PORT` default to the right device.
+
+The compute/power node is a Pi 5 (`node-compute`): `sysmon_driver.py` reports its
+temperature, PMIC power, fan and supply state, and `bms_driver.py` its UPS battery
+and solar input. Use the active cooler and the 27 W supply.
 
 ---
 

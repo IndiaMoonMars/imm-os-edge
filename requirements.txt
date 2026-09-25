@@ -8,6 +8,7 @@ smbus2==0.4.3
 
 # Specific Adafruit standard hardware libraries
 adafruit-blinka==8.38.0
+adafruit-extended-bus==1.0.2                       # I2C by bus number (no `import board`: works on Pi 5)
 adafruit-circuitpython-scd4x==1.4.13
 adafruit-circuitpython-tsl2561==3.3.25
 adafruit-circuitpython-tca9548a==0.8.6
@@ -21,7 +22,7 @@ pi-ina219==1.4.1
 gpiozero==2.0.1; sys_platform == "linux"          # flow meter, PIR, relays (Pi 4 and 5)
 lgpio==0.2.2.0; sys_platform == "linux"           # HX711 bit-banging (tight timing)
 adafruit-circuitpython-pca9685==3.4.15            # tunable-white LED PWM
-mfrc522==0.0.7; sys_platform == "linux"           # RC522 RFID over SPI (optional; USB readers use evdev)
+spidev==3.6; sys_platform == "linux"              # RC522 RFID over SPI (core/rc522.py; USB readers use evdev)
 pyserial==3.5                                      # GPS (NEO-M9N) and UWB (DWM1001) UARTs
 
 # ── Core Edge Networking & Replay ───────────────────────────────

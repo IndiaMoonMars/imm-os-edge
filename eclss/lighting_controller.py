@@ -4,6 +4,9 @@ import argparse
 import logging
 import os
 import json
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [lighting] %(message)s")
 log = logging.getLogger(__name__)
@@ -35,10 +38,9 @@ def parse_zones(spec: str) -> dict:
 
 class PCA9685Output:
     def __init__(self, zones: dict):
-        import board
-        import busio
         from adafruit_pca9685 import PCA9685
-        self.pca = PCA9685(busio.I2C(board.SCL, board.SDA), address=int(os.getenv("LIGHT_PCA_ADDRESS", "0x40"), 16))
+        from hw import i2c_bus
+        self.pca = PCA9685(i2c_bus(), address=int(os.getenv("LIGHT_PCA_ADDRESS", "0x40"), 16))
         self.pca.frequency = int(os.getenv("LIGHT_PWM_HZ", "1000"))  # above visible flicker
         self.zones = zones
 

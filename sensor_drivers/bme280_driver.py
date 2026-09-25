@@ -14,8 +14,8 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from mqtt_publisher import MODES, make_publisher  # noqa: E402
 
-I2C_PORT = 1
-BME280_ADDRESS = 0x76
+I2C_PORT = int(os.getenv("I2C_BUS", "1"))
+BME280_ADDRESS = int(os.getenv("BME280_ADDRESS", "0x76"), 16)   # 0x77 on Adafruit-style boards (SDO high)
 MQTT_TOPIC = "habitat/sensors/bme280/zone1"
 
 

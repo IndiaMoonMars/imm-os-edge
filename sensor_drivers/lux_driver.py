@@ -8,9 +8,9 @@ ZONES = {"Zone_A": 0, "Zone_B": 1, "Zone_C": 2}
 
 def read_loop(publish_fn):
     try:
-        import board, busio
         import adafruit_tsl2561, adafruit_tca9548a
-        i2c = busio.I2C(board.SCL, board.SDA)
+        from hw import i2c_bus
+        i2c = i2c_bus()
         tca = adafruit_tca9548a.TCA9548A(i2c)
         sensors = {zone: adafruit_tsl2561.TSL2561(tca[ch]) for zone, ch in ZONES.items()}
     except Exception as e:

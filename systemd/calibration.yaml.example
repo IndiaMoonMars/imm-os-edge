@@ -8,7 +8,8 @@
 #
 # Sensor / field names:
 #   bme280: temp hum pres         scd40: co2_ppm temp hum      o2: o2_pct      mq7: co_ppm
-#   tsl2561: lux                  ina219: voltage_v current_ma power_mw        jetson: cpu_temp gpu_temp power_w
+#   tsl2561: lux                  ina219: voltage_v current_ma power_mw        bms: battery_pct solar_w
+#   sysmon: cpu_temp power_w supply_v (node health; rarely needs correcting)
 #   ds18b20: temp (biolab water)  ezo_ph: ph                   mlx90614: temp (EVA skin)
 # Which reference to use:
 #   temperature  calibrated thermometer next to the sensor, 30 min settle, one-point

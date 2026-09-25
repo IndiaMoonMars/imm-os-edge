@@ -1,15 +1,15 @@
 """
 IMM-OS Sensor Simulator
 =======================
-Simulates RPi + Jetson edge nodes, publishing exactly what the real drivers in
+Simulates the Raspberry Pi edge nodes, publishing exactly what the real drivers in
 sensor_drivers/ publish: one JSON reading per sensor on
 habitat/sensors/<sensor>/<zone>, stamped with node_id, zone and "simulated": true.
 The telemetry pipeline (bridge → validator → processor) treats both the same.
 
 Simulated nodes and sensors:
-  - node-rpi-01  zone_a : bme280, scd40, o2
-  - node-rpi-02  zone_b : bme280, scd40, o2
-  - node-jetson  compute: jetson (CPU/GPU temp, power), bms (battery, solar)
+  - node-rpi-01   zone_a : bme280, scd40, o2, sysmon
+  - node-rpi-02   zone_b : bme280, scd40, o2, sysmon
+  - node-compute  compute: sysmon (Raspberry Pi 5 health + PMIC power), bms (battery, solar)
 
 Bring real hardware online one sensor at a time with DISABLED_SENSORS, a comma
 list of "sensor" (all nodes) or "node_id:sensor" entries, e.g.
@@ -106,19 +106,27 @@ def build_env_payload(node: dict, state: SensorState, t: float) -> dict[str, dic
     }
 
 
+def build_sysmon_payload(node: dict, state: SensorState, t: float) -> dict[str, dict]:
+    """Node health (sysmon_driver.py) for every node; PMIC power only on a Pi 5."""
+    out = {
+        "cpu_temp": {"value": sine_wave(t, node.get("cpu_temp_base", 47.0), 4.0, 1800), "unit": "celsius"},
+        "cpu_load": {"value": state.walk("load", 12.0, 3.0, 2.0, 95.0), "unit": "percent"},
+        "mem_pct": {"value": state.walk("mem", 35.0, 0.5, 10.0, 90.0), "unit": "percent"},
+        "disk_pct": {"value": state.walk("disk", 22.0, 0.01, 5.0, 95.0), "unit": "percent"},
+        "undervolt": {"value": 0, "unit": "flag"},
+        "throttled": {"value": 0, "unit": "flag"},
+    }
+    if "Pi 5" in node.get("hardware", ""):
+        out["fan_rpm"] = {"value": int(state.walk("fan", 2600, 80, 0, 8000)), "unit": "rpm"}
+        out["supply_v"] = {"value": state.walk("supply", 5.1, 0.01, 4.9, 5.25), "unit": "volts"}
+    return out
+
+
 def build_power_payload(node: dict, state: SensorState, t: float) -> dict[str, dict]:
-    """Power/compute payload for Jetson node."""
+    """Compute/power node: Pi 5 board power + battery and solar."""
     return {
-        "cpu_temp": {
-            "value": sine_wave(t, node["cpu_temp_base"], 5.0, 1800),
-            "unit": "celsius",
-        },
-        "gpu_temp": {
-            "value": sine_wave(t, node["gpu_temp_base"], 8.0, 1800),
-            "unit": "celsius",
-        },
         "power_draw": {
-            "value": state.walk("power", node["power_base"], 1.0, 5.0, 25.0),
+            "value": state.walk("power", node["power_base"], 0.4, 2.5, 12.0),
             "unit": "watts",
         },
         "battery_level": {
@@ -134,6 +142,9 @@ def build_power_payload(node: dict, state: SensorState, t: float) -> dict[str, d
 
 # ── Sensor-format readings (same schema as the real drivers) ─────
 
+SYSMON_METRICS = ("cpu_temp", "cpu_load", "mem_pct", "disk_pct", "fan_rpm", "supply_v", "undervolt", "throttled")
+
+
 def parse_disabled(spec: str) -> set:
     return {x.strip() for x in (spec or "").split(",") if x.strip()}
 
@@ -145,19 +156,20 @@ def is_disabled(disabled: set, node_id: str, sensor: str) -> bool:
 def build_sensor_readings(node: dict, env: dict, ts: int) -> list:
     """Map one tick of simulated values to [(topic, payload)] in driver format."""
     zone = node["zone"]
+    v = {k: env[k]["value"] for k in env}
     if node["type"] == "rpi":
-        v = {k: env[k]["value"] for k in env}
         readings = [
             ("bme280", {"temp": v["temperature"], "hum": v["humidity"], "pres": v["pressure"]}),
             ("scd40", {"co2_ppm": v["co2"], "temp": round(v["temperature"] + 0.4, 3), "hum": round(v["humidity"] - 1.0, 3)}),
             ("o2", {"o2_pct": v["o2"]}),
         ]
     else:
-        v = {k: env[k]["value"] for k in env}
-        readings = [
-            ("jetson", {"cpu_temp": v["cpu_temp"], "gpu_temp": v["gpu_temp"], "power_w": v["power_draw"]}),
-            ("bms", {"battery_pct": v["battery_level"], "solar_w": v["solar_input"]}),
-        ]
+        readings = [("bms", {"battery_pct": v["battery_level"], "solar_w": v["solar_input"]})]
+    sysmon = {k: v[k] for k in SYSMON_METRICS if k in v}
+    if "power_draw" in v:
+        sysmon["power_w"] = v["power_draw"]
+    if sysmon:
+        readings.append(("sysmon", sysmon))
     out = []
     for sensor, metrics in readings:
         payload = {"sensor": sensor, **metrics, "timestamp": ts,
@@ -176,6 +188,7 @@ def publish_node(client: mqtt.Client, node: dict, state: SensorState, t: float, 
         readings = build_env_payload(node, state, t)
     else:
         readings = build_power_payload(node, state, t)
+    readings.update(build_sysmon_payload(node, state, t))
 
     sent = 0
     for topic, payload in build_sensor_readings(node, readings, ts):
