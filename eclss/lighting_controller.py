@@ -72,7 +72,13 @@ def listen_loop():
     # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
     if os.getenv("MQTT_USERNAME"):
         client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
+    if os.getenv("MQTT_TLS_CA"):  # broker TLS listener (8883); verifies cert + hostname
+        client.tls_set(ca_certs=os.getenv("MQTT_TLS_CA"))
     client.on_connect = on_connect
+    # TLS/DNS/refused errors are otherwise swallowed by the retry loop
+    client.on_connect_fail = lambda c, u: log.error(
+        f"MQTT connection to {host}:{port} failed (check MQTT_HOST matches the broker certificate, "
+        f"MQTT_TLS_CA and credentials); retrying")
     client.on_message = on_lighting_message
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect_async(host, port, keepalive=60)
