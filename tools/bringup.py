@@ -35,7 +35,7 @@ from typing import Dict, List, Optional, Tuple
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "core"))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-from hw import board_model, default_uart, i2c_bus_number, is_pi5  # noqa: E402
+from hw import board_model, default_uart, esp32_port, i2c_bus_number, is_pi5  # noqa: E402
 
 ENV_FILE = os.getenv("IMM_ENV_FILE", "/etc/imm-os/edge.env")
 SECRET_KEYS = {"MQTT_PASSWORD", "IMM_EDGE_CLIENT_SECRET"}
@@ -57,10 +57,12 @@ class Sensor:
     ranges: Dict[str, Tuple[float, float]]    # metric → plausible (lo, hi)
     i2c: List[int] = field(default_factory=list)
     uart: bool = False
+    usb: bool = False                         # ESP32 sensor board on a USB port
     timeout_s: float = 20.0
     args: List[str] = field(default_factory=list)
     tip: str = ""                             # sanity check against a reference
     simulated: bool = False                   # the MCC simulator fakes this sensor today
+    replaces: List[str] = field(default_factory=list)   # simulator streams it takes over (default: its own name)
     count: Optional[int] = None               # readings to wait for (default: --count)
     chip_id: Optional[Tuple[int, int, Dict[int, str]]] = None   # (address, register, {value: name}) to identify the part
 
@@ -89,6 +91,14 @@ def sensors() -> Dict[str, Sensor]:
         "mq7": Sensor("sensor_drivers/mq7_uart_bridge.py", {"co_ppm": (0, 1000)}, uart=True, timeout_s=320, count=1,
                       tip="the STM32 reports once per 150 s heater cycle; calibrate in clean air with "
                           "mq7_uart_bridge.py --calibrate; readings mean little before 24–48 h burn-in"),
+        "esp32": Sensor("sensor_drivers/esp32_bridge.py",
+                        {"temp": (-10, 60), "hum": (0, 100), "pres": (300, 1100), "co2_ppm": (250, 5000),
+                         "o2_pct": (15.0, 25.0), "heading_deg": (0, 360), "roll_deg": (-180, 180),
+                         "pitch_deg": (-180, 180), "imu_calib": (0, 3), "vout_mv": (50, 5000)},
+                        usb=True, timeout_s=30, count=30, simulated=True, replaces=["bme280", "scd40", "o2"],
+                        tip="board sensors: BME280/SCD40 against a room thermometer and fresh air (~420 ppm CO₂); "
+                            "O₂ 20.9 % after CAL_O2 in fresh air; MQ-4 ppm only after 3 min warm-up and "
+                            "CAL_MQ4 in clean air (esp32_bridge.py --send CAL_MQ4); rotate the board until imu_calib is 3"),
         "sysmon": Sensor("sensor_drivers/sysmon_driver.py", {"cpu_temp": (0, 85), "undervolt": (0, 0), "throttled": (0, 0)},
                          args=["--interval", "2"], timeout_s=15, simulated=True,
                          tip="undervolt=1 means the power supply is too weak (Pi 5: use the 27 W 5 V/5 A supply)"),
@@ -309,6 +319,14 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
         print(f"\n{name}: fix the bus problem above first.")
         return 1
 
+    if sensor.usb:
+        port = esp32_port()
+        if not port:
+            r.fail("no ESP32 on USB: plug the board into a Pi USB port with a data cable (or set ESP32_PORT)")
+            print(f"\n{name}: connect the board first.")
+            return 1
+        r.ok(f"ESP32 on {port}")
+
     if sensor.chip_id:
         value, part = identify(open_i2c(), *sensor.chip_id)
         if value is None or value not in sensor.chip_id[2] or "!" in part:
@@ -350,7 +368,8 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
     print(f"{name}: PASS. Next: add {driver} to this node's sensors "
           f"(sudo scripts/setup-node.sh --sensors \"… {driver}\")")
     if sensor.simulated:
-        print(f"  and stop the MCC simulator faking it: SIM_DISABLED_SENSORS=<node>:{name} in imm-os-infra/.env, "
+        sims = ",".join(f"<node>:{s}" for s in (sensor.replaces or [name]))
+        print(f"  and stop the MCC simulator faking it: SIM_DISABLED_SENSORS={sims} in imm-os-infra/.env, "
               "then docker compose up -d sensor-sim")
     return 0
 
@@ -414,6 +433,8 @@ def stm32_answers(port: str, wait_s: float = 2.5) -> bool:
 
 def connected(sensor: Sensor, found_i2c, uart_present: bool) -> bool:
     """Is this sensor's hardware visible? (Doesn't prove it works; bringup() does that.)"""
+    if sensor.usb:
+        return bool(esp32_port())
     if sensor.uart:
         return uart_present
     return all(a in found_i2c for a in sensor.i2c)

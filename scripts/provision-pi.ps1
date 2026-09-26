@@ -13,8 +13,8 @@
          go over SSH into a file only the Pi user can read, which setup deletes; they
          never appear on a command line;
       5. reboots the Pi, then runs the health checks and tools/bringup.py all;
-      6. if the checks pass, stops simulating this node's health data (sysmon), so
-         its card on the Sensors tab shows LIVE.
+      6. if the checks pass, stops simulating this node's health data (sysmon), and the
+         sensors in -Sensors if they also passed bring-up, so their cards show LIVE.
 
     Safe to re-run: setup-node.sh only changes what isn't set up yet.
 
@@ -227,37 +227,50 @@ $checks = $LASTEXITCODE
 
 Step 'Sensor bring-up (tools/bringup.py all)'
 & ssh -t @SshOpts $Target 'cd ~/imm-os-edge && sudo .venv/bin/python tools/bringup.py all'
+$bringup = $LASTEXITCODE
 
-# ---- 6. Node health LIVE on the dashboard ----------------------------------
+# ---- 6. Real data LIVE on the dashboard ------------------------------------
 Step 'Dashboard'
 if ($checks -ne 0) {
     Warn 'health checks failed, so the simulator was left as it is. Fix the checks marked with a cross above and re-run this script.'
     exit 1
 }
+# Simulator streams each driver takes over; node health (sysmon) always runs
+$simByDriver = @{
+    'esp32_bridge.py' = @('bme280', 'scd40', 'o2'); 'bme280_driver.py' = @('bme280'); 'scd40_driver.py' = @('scd40')
+    'o2_driver.py' = @('o2'); 'mq7_uart_bridge.py' = @('mq7'); 'lux_driver.py' = @('tsl2561'); 'bms_driver.py' = @('bms')
+}
+$simNames = @('sysmon')
+$drivers = @($Sensors -split '\s+' | Where-Object { $_ })
+if ($drivers.Count -gt 0) {
+    if ($bringup -eq 0) {
+        foreach ($d in $drivers) { if ($simByDriver.ContainsKey($d)) { $simNames += $simByDriver[$d] } }
+    } else {
+        Warn 'a sensor failed bring-up (see the summary above), so only node health switches from SIM to LIVE. Fix it and re-run this script.'
+    }
+}
 if ($KeepSim) {
     Ok 'checks passed; -KeepSim: simulator unchanged'
 } else {
     $text = [System.IO.File]::ReadAllText($envFile)
-    $entry = "${NodeId}:sysmon"
+    $entries = @($simNames | Select-Object -Unique | ForEach-Object { "${NodeId}:$_" })
     $m = [regex]::Match($text, '(?m)^SIM_DISABLED_SENSORS=([^\r\n]*)')
     if ($m.Success) {
         $list = @($m.Groups[1].Value.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        if ($list -notcontains $entry) {
-            $list += $entry
-            $text = $text.Substring(0, $m.Groups[1].Index) + ($list -join ',') +
-                $text.Substring($m.Groups[1].Index + $m.Groups[1].Length)
-        }
+        foreach ($e in $entries) { if ($list -notcontains $e) { $list += $e } }
+        $text = $text.Substring(0, $m.Groups[1].Index) + ($list -join ',') +
+            $text.Substring($m.Groups[1].Index + $m.Groups[1].Length)
     } else {
         $nl = "`n"; if ($text.Contains("`r`n")) { $nl = "`r`n" }
         if ($text.Length -gt 0 -and -not $text.EndsWith("`n")) { $text += $nl }
-        $text += "SIM_DISABLED_SENSORS=$entry$nl"
+        $text += "SIM_DISABLED_SENSORS=$($entries -join ',')$nl"
     }
     [System.IO.File]::WriteAllText($envFile, $text, (New-Object System.Text.UTF8Encoding($false)))
-    Ok "SIM_DISABLED_SENSORS in .env includes $entry"
+    Ok "SIM_DISABLED_SENSORS in .env includes $($entries -join ', ')"
     Push-Location $InfraDir
     try { & docker compose up -d sensor-sim; $rc = $LASTEXITCODE } finally { Pop-Location }
     if ($rc -ne 0) { Warn 'docker compose up -d sensor-sim failed; run it in imm-os-infra yourself' }
-    else { Ok 'simulator restarted without it' }
+    else { Ok 'simulator restarted without them' }
 }
 Write-Host ''
 Write-Host "Done. Open http://imm.local > Sensors: the Node health card of $NodeId should show LIVE." -ForegroundColor Green

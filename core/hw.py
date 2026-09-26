@@ -13,6 +13,7 @@ Raspberry Pi 5 notes (the RP1 I/O chip changed a few things):
   - The header UART (GPIO14/15) is /dev/ttyAMA0 on a Pi 5; /dev/serial0 points at the
     separate debug connector there. default_uart() picks the right one.
 """
+import glob
 import json
 import logging
 import os
@@ -71,6 +72,23 @@ def default_uart(model: str = None, exists=os.path.exists) -> str:
 
 def uart_port(env_name: str) -> str:
     return os.getenv(env_name) or default_uart()
+
+
+# USB-serial chips on ESP32 dev boards: Silicon Labs CP210x, WCH CH340/CH9102, native USB
+ESP32_USB_IDS = ("CP210", "Silicon_Labs", "1a86", "CH340", "CH9102", "wch.cn", "Espressif", "USB_JTAG")
+
+
+def esp32_port(env=os.environ, find=glob.glob) -> str:
+    """The ESP32 sensor board's USB serial port: ESP32_PORT, else the first known USB-serial chip."""
+    if env.get("ESP32_PORT"):
+        return env["ESP32_PORT"]
+    for path in sorted(find("/dev/serial/by-id/*")):
+        if any(i.lower() in os.path.basename(path).lower() for i in ESP32_USB_IDS):
+            return path
+    for path in ("/dev/ttyUSB0", "/dev/ttyACM0"):
+        if find(path):
+            return path
+    return ""
 
 
 # ── GPIO ──────────────────────────────────────────────────────────
