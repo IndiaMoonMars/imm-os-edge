@@ -270,3 +270,17 @@ def test_serial_console_detection():
     assert bringup.serial_console_on("/dev/ttyAMA0", "console=ttyAMA0,115200 console=tty1")
     assert bringup.serial_console_on("/dev/serial0", "console=serial0,115200")
     assert not bringup.serial_console_on("/dev/ttyAMA0", "console=tty1 root=PARTUUID=1")
+
+
+def test_bringup_all_only_runs_connected_sensors(monkeypatch, capsys):
+    table = bringup.sensors()
+    monkeypatch.setattr(bringup, "i2c_scan", lambda bus: [0x76, 0x62])
+    monkeypatch.setattr(bringup, "open_i2c", lambda: None)
+    monkeypatch.setattr(bringup.os.path, "exists", lambda p: False)
+    ran = []
+    monkeypatch.setattr(bringup, "bringup", lambda name, s, c, py: ran.append(name) or (0 if name == "bme280" else 1))
+    rc = bringup.bringup_all(table, 1, "python3")
+    assert set(ran) == {"bme280", "scd40", "sysmon"}       # sysmon needs no bus; MQ-7 UART absent
+    out = capsys.readouterr().out
+    assert "✗ scd40" in out and "· mq7" in out and '--sensors "bme280_driver.py"' in out
+    assert rc == 1

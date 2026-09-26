@@ -24,6 +24,7 @@ import paho.mqtt.client as mqtt
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_QOS = 1
+MAX_QUEUED = int(os.getenv("MQTT_MAX_QUEUED", "5000"))
 
 
 def create_client() -> mqtt.Client:
@@ -33,16 +34,20 @@ def create_client() -> mqtt.Client:
         client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
     if os.getenv("MQTT_TLS_CA"):  # broker TLS listener (8883); verifies cert + hostname
         client.tls_set(ca_certs=os.getenv("MQTT_TLS_CA"))
-    client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+    # Don't block the sampling loop on broker round-trips: paho's network thread delivers
+    # (and retries QoS 1) in the background. Bounded, so an MCC outage can't eat the RAM;
+    # the blackbox (stdout) keeps everything regardless.
+    client.max_queued_messages_set(MAX_QUEUED)
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
+    client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
     client.loop_start()
     return client
 
 
 def publish(client: mqtt.Client, topic: str, payload: dict) -> None:
-    """Serialize payload to JSON and publish to the given MQTT topic."""
+    """Serialize payload to JSON and queue it for the broker (non-blocking)."""
     msg = json.dumps(payload, separators=(",", ":"))
-    result = client.publish(topic, msg, qos=MQTT_QOS)
-    result.wait_for_publish(timeout=2.0)
+    client.publish(topic, msg, qos=MQTT_QOS)
 
 
 def stamp(payload: dict, topic: str) -> tuple:

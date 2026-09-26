@@ -92,7 +92,7 @@ class FakeMax30100Bus:
 
     def write_byte_data(self, addr, reg, value):
         self.writes.append((reg, value))
-        self.regs[reg] = value
+        self.regs[reg] = value & ~0x40 if reg == 0x06 else value   # RESET bit self-clears, like the chip
 
     def read_i2c_block_data(self, addr, reg, n):
         assert reg == 0x05 and n <= 32

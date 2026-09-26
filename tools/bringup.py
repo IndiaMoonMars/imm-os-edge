@@ -6,6 +6,7 @@ Sensor bring-up: check one sensor at a time on the bench before it goes live.
   bringup.py bme280           that report for the sensor's bus, then run its real driver
                               (stdout only, nothing is published) and check every value
   bringup.py bme280 -n 5      wait for 5 readings (default 3)
+  bringup.py all              every sensor whose bus device is present, then a summary
   bringup.py --list           the sensors it knows
 
 Run it as the service user with the node's settings, e.g.
@@ -357,7 +358,7 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
 def main(argv=None) -> int:
     known = sensors()
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("sensor", nargs="?", choices=sorted(known), metavar="SENSOR")
+    p.add_argument("sensor", nargs="?", choices=sorted(known) + ["all"], metavar="SENSOR|all")
     p.add_argument("-n", "--count", type=int, default=3)
     p.add_argument("--list", action="store_true")
     p.add_argument("--python", default=sys.executable, help="interpreter for the driver (default: this one)")
@@ -369,6 +370,8 @@ def main(argv=None) -> int:
             print(f"  {name:9} {bus:18} {s.driver}")
         return 0
 
+    if any(p.rstrip("/").endswith("hwsim") for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p):
+        print("!!! FAKE HARDWARE: tools/hwsim is on PYTHONPATH. Results below say nothing about real sensors.\n")
     for k, v in load_env_file(ENV_FILE).items():
         os.environ.setdefault(k, v)
     known = sensors()     # re-read addresses now that edge.env is loaded
@@ -379,7 +382,41 @@ def main(argv=None) -> int:
         print(f"\n{'All board checks passed.' if not r.fails else f'{r.fails} problem(s).'}  "
               "Next: bringup.py <sensor> for each sensor you have wired (see --list).")
         return 1 if r.fails else 0
+    if args.sensor == "all":
+        return bringup_all(known, args.count, args.python)
     return bringup(args.sensor, known[args.sensor], args.count, args.python)
+
+
+def connected(sensor: Sensor, found_i2c, uart_present: bool) -> bool:
+    """Is this sensor's hardware visible? (Doesn't prove it works; bringup() does that.)"""
+    if sensor.uart:
+        return uart_present
+    return all(a in found_i2c for a in sensor.i2c)
+
+
+def bringup_all(known: dict, count: int, python: str) -> int:
+    """Check every sensor whose bus device is present, then print one summary table."""
+    try:
+        found = set(i2c_scan(open_i2c()))
+    except OSError:
+        found = set()
+    uart = os.path.exists(os.getenv("MQ7_PORT") or default_uart())
+    results = []
+    for name, sensor in sorted(known.items()):
+        if not connected(sensor, found, uart):
+            results.append((name, "not connected", ""))
+            continue
+        print(f"\n════ {name} ════")
+        rc = bringup(name, sensor, count, python)
+        results.append((name, "PASS" if rc == 0 else "FAIL", os.path.basename(sensor.driver)))
+    print("\n════ Summary ════")
+    for name, state, driver in results:
+        mark = {"PASS": "✓", "FAIL": "✗"}.get(state, "·")
+        print(f"  {mark} {name:9} {state:14} {driver}")
+    passed = [d for _, st, d in results if st == "PASS"]
+    if passed:
+        print(f"\nTo run the passing ones as services:\n  sudo scripts/setup-node.sh --sensors \"{' '.join(passed)}\"")
+    return 1 if any(st == "FAIL" for _, st, _ in results) else 0
 
 
 if __name__ == "__main__":

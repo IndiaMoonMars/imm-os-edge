@@ -28,6 +28,9 @@ sudo .venv/bin/python tools/bringup.py scd40        # bus check + real driver + 
 Wiring, addresses and the order for every habitat sensor: [real-sensors/BENCH.md](real-sensors/BENCH.md).
 The MQ-7 CO sensor runs on an STM32: [firmware/stm32-mq7](firmware/stm32-mq7/README.md).
 
+No hardware at hand? `tools/hwsim` stands in for the sensor libraries, so the unmodified drivers
+run on a laptop: `PYTHONPATH=tools/hwsim python sensor_drivers/ecg_driver.py`.
+
 When a sensor passes, add its driver with `setup-node.sh --sensors "…"` and switch it off
 in the MCC simulator (`SIM_DISABLED_SENSORS`). Every node also runs `sysmon_driver.py`
 (node health: temperature, load, power supply, Pi 5 PMIC power and fan).

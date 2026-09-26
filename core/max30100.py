@@ -49,11 +49,21 @@ class MAX30100:
         if part != PART_ID_MAX30100:
             raise RuntimeError(f"unexpected part ID 0x{part:02X} at 0x{address:02X} (MAX30100 is 0x11)")
         self.bus.write_byte_data(self.addr, REG_MODE_CONFIG, MODE_RESET)
+        self._wait_reset()
         self.bus.write_byte_data(self.addr, REG_SPO2_CONFIG, SPO2_HI_RES | SR_100HZ | PW_1600US)
         self.bus.write_byte_data(self.addr, REG_LED_CONFIG, ((led_red & 0x0F) << 4) | (led_ir & 0x0F))
         self.bus.write_byte_data(self.addr, REG_MODE_CONFIG, MODE_HR)
         self._clear_fifo()
         self.ir = self.red = 0
+
+    def _wait_reset(self, timeout_s: float = 0.1) -> None:
+        """The RESET bit clears itself once the chip is ready; registers written before that are lost."""
+        import time
+        deadline = time.monotonic() + timeout_s
+        while self.bus.read_byte_data(self.addr, REG_MODE_CONFIG) & MODE_RESET:
+            if time.monotonic() > deadline:
+                raise RuntimeError("MAX30100 did not come out of reset")
+            time.sleep(0.002)
 
     def _clear_fifo(self) -> None:
         for reg in (REG_FIFO_WR_PTR, REG_OVF_COUNTER, REG_FIFO_RD_PTR):

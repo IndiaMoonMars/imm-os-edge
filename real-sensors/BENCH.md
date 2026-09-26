@@ -150,7 +150,16 @@ SIM_DISABLED_SENSORS=node-rpi-01:bme280,node-rpi-01:scd40,node-rpi-01:o2,node-rp
 ```
 
 then `docker compose up -d sensor-sim`. Every zone A value on the Overview turns
-**LIVE**. The node-rpi-02 and node-compute values stay SIM until those Pis exist.
+**LIVE**.
+
+**Watch it arrive in real time:** open the mission console's **Sensors** tab. Every
+sensor on every node appears as a card as its readings arrive over the realtime link:
+- LIVE/SIM badge;
+- current values and a trend line (the ECG shows the waveform);
+- how often it reports and how long ago it last did.
+
+A card turns amber when a sensor goes quiet for longer than expected, and red when it
+has stopped. The node-rpi-02 and node-compute values stay SIM until those Pis exist.
 
 Calibrate against reference instruments afterwards with `tools/calibrate.py`
 (see [README.md](README.md#calibration)).
