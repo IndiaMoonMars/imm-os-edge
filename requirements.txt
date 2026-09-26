@@ -1,6 +1,12 @@
+# Every package here installs from a prebuilt wheel (or pure-Python source) on Raspberry Pi
+# OS with Python 3.13 on the Pi 5, so a node never needs a compiler. The C-extension
+# libraries lgpio, spidev and evdev come from the OS instead (python3-lgpio, python3-spidev,
+# python3-evdev, installed by scripts/setup-node.sh); the venv sees them through
+# --system-site-packages.
+
 # ── Protocol Buffers ─────────────────────────────────────────────
-protobuf==4.25.3
-grpcio-tools==1.62.1
+protobuf==4.25.3                                   # blackbox chunks (core/telemetry_pb2.py is committed;
+                                                   # regenerating it needs grpcio-tools on a dev machine)
 
 # ── Sensor Integrations ──────────────────────────────────────────
 # Base I2C / SPI / UART interfaces
@@ -14,23 +20,20 @@ adafruit-circuitpython-tsl2561==3.3.25
 adafruit-circuitpython-tca9548a==0.8.6
 adafruit-circuitpython-ads1x15==2.2.22
 
-# Other community hardware drivers (MAX30100: core/max30100.py, no package needed)
+# Other community hardware drivers (MAX30100 and INA219: core/max30100.py, core/ina219.py)
 RPi.bme280==0.2.4
-pi-ina219==1.4.1
 
 # ── ECLSS / EVA hardware (Phase 5) ───────────────────────────────
 gpiozero==2.0.1; sys_platform == "linux"          # flow meter, PIR, relays (Pi 4 and 5)
-lgpio==0.2.2.0; sys_platform == "linux"           # HX711 bit-banging (tight timing)
+# lgpio (HX711 bit-banging) and spidev (RC522 over SPI): from the OS, see the top
 adafruit-circuitpython-pca9685==3.4.15            # tunable-white LED PWM
-spidev==3.6; sys_platform == "linux"              # RC522 RFID over SPI (core/rc522.py; USB readers use evdev)
 pyserial==3.5                                      # GPS (NEO-M9N) and UWB (DWM1001) UARTs
 
 # ── Core Edge Networking & Replay ───────────────────────────────
 paho-mqtt==1.6.1
-confluent-kafka==2.3.0
+confluent-kafka==2.6.1                             # blackbox replay; has Python 3.13 aarch64 wheels
 requests==2.31.0
-PyYAML==6.0.1                                      # calibration.yaml
+PyYAML==6.0.2                                      # calibration.yaml
 
 # ── Inventory (Phase 11) ─────────────────────────────────────────
-# USB HID barcode scanner input (inventory/barcode_listener.py --device)
-evdev==1.7.1; sys_platform == "linux"
+# USB HID barcode scanner input (inventory/barcode_listener.py --device): evdev from the OS

@@ -15,7 +15,7 @@ MQTT_TOPIC = "habitat/sensors/ina219/power_bus"
 def read_loop(publish_fn):
     try:
         from ina219 import INA219
-        # busnum must be explicit: pi-ina219 can't detect the bus on 64-bit Pi OS or a Pi 5
+        # core/ina219.py (register-level; pi-ina219 no longer installs on current Pi OS)
         ina = INA219(env_float("INA219_SHUNT_OHMS", 0.1), busnum=i2c_bus_number(),
                      address=env_int("INA219_ADDRESS", 0x40))
         ina.configure()

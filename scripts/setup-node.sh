@@ -215,9 +215,13 @@ ok "secrets provided (not shown)"
 if [ "$SKIP_APT" = 0 ]; then
     step "Packages"
     run apt-get update -qq
+    # C-extension Python libraries come from the OS, so pip never needs a compiler
+    os_py=()
+    for p in python3-lgpio python3-spidev python3-evdev; do
+        if apt-cache show "$p" >/dev/null 2>&1; then os_py+=("$p"); else warn "$p not in the package lists; the drivers that need it won't start"; fi
+    done
     run apt-get install -y -qq --no-install-recommends \
-        python3-venv python3-dev python3-pip git curl openssl i2c-tools mosquitto-clients \
-        swig liblgpio-dev
+        python3-venv python3-dev python3-pip git curl openssl i2c-tools mosquitto-clients "${os_py[@]}"
     ok "system packages installed"
 fi
 
@@ -259,7 +263,7 @@ step "Python environment ($REPO/.venv)"
 VENV="$REPO/.venv"
 OWNER=$(stat -c %U "$REPO")   # build the venv as whoever owns the checkout
 if [ ! -x "$VENV/bin/python" ]; then
-    # system site packages: reuse the OS's gpiozero/lgpio builds where present
+    # system site packages: lgpio, spidev and evdev come from the OS packages above
     run sudo -u "$OWNER" python3 -m venv --system-site-packages "$VENV"
 fi
 run sudo -u "$OWNER" "$VENV/bin/pip" install -q --upgrade pip

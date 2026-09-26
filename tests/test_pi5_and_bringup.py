@@ -185,6 +185,48 @@ def test_bms_reads_gauge_without_solar():
     assert payload["battery_pct"] == 64.2 and "solar_w" not in payload
 
 
+# ── INA219 (core/ina219.py) ────────────────────────────────────────
+
+class FakeINA219Bus:
+    """Big-endian 16-bit registers, as on the chip."""
+    def __init__(self, regs):
+        self.regs, self.writes = dict(regs), []
+
+    def read_i2c_block_data(self, addr, reg, n):
+        assert (addr, n) == (0x41, 2)
+        v = self.regs[reg]
+        return [v >> 8, v & 0xFF]
+
+    def write_i2c_block_data(self, addr, reg, data):
+        self.writes.append((addr, reg, data[0] << 8 | data[1]))
+
+
+def test_ina219_configures_and_decodes():
+    import ina219
+    # 12.180 V bus (3045 × 4 mV, CNVR set), +84.00 mV shunt → 840 mA through 0.1 Ω
+    bus = FakeINA219Bus({0x02: 3045 << 3 | 0x2, 0x01: 8400})
+    ina = ina219.INA219(0.1, busnum=1, address=0x41, bus=bus)
+    ina.configure()
+    assert bus.writes == [(0x41, 0x00, 0x8000), (0x41, 0x00, 0x3DDF)]   # reset, then 32 V / ±320 mV / 12-bit ×8
+    assert ina.voltage() == pytest.approx(12.18)
+    assert ina.current() == pytest.approx(840.0)
+    assert ina.power() == pytest.approx(12.18 * 840.0)
+    assert ina.supply_voltage() == pytest.approx(12.264)
+
+
+def test_ina219_negative_current_and_range_errors():
+    import ina219
+    bus = FakeINA219Bus({0x02: 3045 << 3, 0x01: 0x10000 - 500})          # −5.00 mV: current flowing back
+    ina = ina219.INA219(0.1, address=0x41, bus=bus)
+    assert ina.current() == pytest.approx(-50.0)
+    bus.regs[0x02] |= 0x1                                                  # math overflow flag
+    with pytest.raises(ina219.DeviceRangeError):
+        ina.voltage()
+    bus.regs[0x01] = 32000                                                 # shunt at full scale
+    with pytest.raises(ina219.DeviceRangeError):
+        ina.current()
+
+
 # ── simulator ──────────────────────────────────────────────────────
 
 def test_simulator_compute_node_is_a_pi5_with_sysmon_and_bms():

@@ -1,7 +1,9 @@
 # hwsim — fake hardware for running the real drivers without sensors
 
 Stand-ins for the hardware libraries the drivers import (RPi.bme280, smbus2, the
-Adafruit SCD4x / TSL2561 / TCA9548A / ADS1x15 / extended-bus modules, pi-ina219, pyserial).
+Adafruit SCD4x / TSL2561 / TCA9548A / ADS1x15 / extended-bus modules, pyserial). The fake
+smbus2 also answers as the MAX17048, MAX30100 and INA219 chips, so the repo's own
+register-level drivers for those (`core/max30100.py`, `core/ina219.py`) run unmodified too.
 Put this directory first on `PYTHONPATH` and the **unmodified** drivers run on a laptop
 and publish plausible readings through the real publisher, TLS, broker and pipeline:
 
