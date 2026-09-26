@@ -17,7 +17,7 @@
 //    "scd40":{"co2_ppm":612,"temp":25.10,"hum":40.30},             (every 5 s, when new)
 //    "bno055":{"heading_deg":..,"roll_deg":..,"pitch_deg":..,"lin_acc_ms2":..,"imu_calib":3},
 //    "o2":{"o2_pct":20.87},
-//    "mq4":{"vout_mv":930,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1}}
+//    "mq4":{"vout_mv":1240,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1}}
 // Lines starting with '#' are diagnostics.
 //
 // Commands (a line sent to the board):
@@ -34,7 +34,7 @@ static const uint32_t PERIOD_MS = 1000, REPROBE_MS = 30000;
 
 // MQ-4: 5 V heater and load circuit on the module, AO divided down to the ESP32's range
 #ifndef MQ4_DIVIDER
-#define MQ4_DIVIDER 1.5f              // (R_top + R_bottom) / R_bottom: 10 kΩ AO→GPIO32, 20 kΩ GPIO32→GND
+#define MQ4_DIVIDER 2.0f              // (R_top + R_bottom) / R_bottom: 10 kΩ AO→GPIO32, 10 kΩ GPIO32→GND
 #endif
 static const float MQ4_VC_MV = 5000.0f;          // module supply
 static const float MQ4_CLEAN_AIR_RATIO = 4.4f;   // Rs/R0 in clean air (datasheet sensitivity curve)

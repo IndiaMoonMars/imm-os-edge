@@ -21,8 +21,8 @@ I2C is on GPIO21 (SDA) and GPIO22 (SCL), with the four I2C sensors powered from 
 MQ-4 runs on 5 V.
 
 **The MQ-4 must go through a divider.** Its AO pin can rise toward 5 V, but the ESP32 only
-tolerates about 3.6 V. The firmware assumes 10 kΩ from AO to GPIO32 and 20 kΩ from GPIO32
-to GND (scale ×1.5). If your resistors differ, set `MQ4_DIVIDER` in `platformio.ini` to
+tolerates about 3.6 V. The board has 10 kΩ from AO to GPIO32 and 10 kΩ from GPIO32 to GND
+(scale ×2.0, so 5 V at AO is 2.5 V at the pin). If your resistors differ, set `MQ4_DIVIDER` in `platformio.ini` to
 (top + bottom) / bottom.
 
 ## Flash it (Windows)

@@ -60,7 +60,7 @@ def sim(tmp_path_factory):
 
 def test_every_sensor_decoded(sim, tmp_path):
     data, notes = sim(BASE + "run 7\n", tmp_path)
-    assert "# sensors: bme280=0x76 scd40=0x62 bno055=0x28 o2=found mq4_r0=0.000 divider=1.50" in notes
+    assert "# sensors: bme280=0x76 scd40=0x62 bno055=0x28 o2=found mq4_r0=0.000 divider=2.00" in notes
     last = data[-1]
     t, p, h = bme280_reference(519888, 415148, 30000)
     assert last["bme280"]["temp"] == pytest.approx(t, abs=0.01)
@@ -69,7 +69,7 @@ def test_every_sensor_decoded(sim, tmp_path):
     assert last["bme280"]["temp"] == 25.08 and last["bme280"]["pres"] == pytest.approx(1006.53, abs=0.01)  # datasheet example
     assert last["bno055"] == {"heading_deg": 90.0, "roll_deg": -5.0, "pitch_deg": 2.0, "lin_acc_ms2": 0.5, "imu_calib": 3}
     assert last["o2"]["o2_pct"] == pytest.approx(20.9 / 120 * 110.5, abs=0.01)   # default key when uncalibrated
-    assert last["mq4"] == {"vout_mv": 930, "warming": 1, "calibrated": 0}         # 620 mV × 1.5 divider; no ppm yet
+    assert last["mq4"] == {"vout_mv": 1240, "warming": 1, "calibrated": 0}        # 620 mV × 2.0 divider; no ppm yet
 
 
 def test_scd40_every_5_s_with_crc_checked_words(sim, tmp_path):
@@ -97,13 +97,13 @@ def test_mq4_calibration_and_ppm(sim, tmp_path):
     data, notes = sim(script, tmp_path)
     assert any("still warming up" in n for n in notes)
     assert any(n.startswith("# CAL_MQ4: R0 stored") for n in notes)
-    rs_rl = (5000 - 930) / 930
+    rs_rl = (5000 - 1240) / 1240
     r0 = rs_rl / 4.4
-    after_cal = [d["mq4"] for d in data if d["mq4"].get("calibrated") == 1 and d["mq4"]["vout_mv"] == 930]
+    after_cal = [d["mq4"] for d in data if d["mq4"].get("calibrated") == 1 and d["mq4"]["vout_mv"] == 1240]
     assert after_cal[-1]["rs_r0"] == pytest.approx(4.4, abs=0.01)
     assert after_cal[-1]["ch4_ppm"] == pytest.approx(1012.7 * 4.4 ** -2.786, abs=0.1)   # clean air
-    gas = [d["mq4"] for d in data if d["mq4"]["vout_mv"] == 465 and d["mq4"]["warming"] == 0][-1]
-    assert gas["rs_r0"] == pytest.approx(((5000 - 465) / 465) / r0, abs=0.01)
+    gas = [d["mq4"] for d in data if d["mq4"]["vout_mv"] == 620 and d["mq4"]["warming"] == 0][-1]
+    assert gas["rs_r0"] == pytest.approx(((5000 - 620) / 620) / r0, abs=0.01)
     # after a reboot R0 comes back from flash, and ppm waits for the warm-up again
     rebooted = data[-1]["mq4"]
     assert rebooted["calibrated"] == 1 and rebooted["warming"] == 1 and "ch4_ppm" not in rebooted

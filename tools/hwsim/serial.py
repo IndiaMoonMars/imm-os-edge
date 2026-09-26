@@ -38,7 +38,7 @@ class Serial:
         if cmd == b"CAL":
             self._pending.append(b"# CAL: R0 is set at the end of this cycle (keep the sensor in clean air)\n")
         elif cmd == b"STATUS":
-            self._pending.append(b"# sensors: bme280=0x76 scd40=0x62 bno055=0x28 o2=found mq4_r0=1.200 divider=1.50\n"
+            self._pending.append(b"# sensors: bme280=0x76 scd40=0x62 bno055=0x28 o2=found mq4_r0=1.200 divider=2.00\n"
                                  if self.esp32 else b"# phase=5.0V elapsed_s=12 r0=1000 cycles=3\n")
         elif cmd in (b"CAL_MQ4", b"CAL_O2"):
             self._pending.append(b"# " + cmd + b": ok (hwsim)\n")
