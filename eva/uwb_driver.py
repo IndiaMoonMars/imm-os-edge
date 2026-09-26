@@ -1,60 +1,87 @@
 #!/usr/bin/env python3
 """
-UWB Driver — Interfaces with Decawave DWM1001 beacons over serial UART.
-Parses position packets from the DWM1001 TAG in simulation mode generating
-X/Y coordinates in a 10m × 10m habitat grid at >5 Hz.
+UWB driver — Qorvo/Decawave DWM1001 (MDEK1001) tag over its UART shell.
+
+The tag computes its own position from the anchors (configure anchors and their
+positions with the Decawave app or shell first). This driver opens the shell
+(two Enter presses), starts `lec` output (CSV with a POS block per update, ~10 Hz)
+and publishes x/y/z (metres) and the quality factor to habitat/eva/uwb.
+
+Connect the DWM1001-DEV board by USB (/dev/ttyACM0) or its UART pins (/dev/serial0).
+
+Environment:
+  UWB_PORT=/dev/ttyACM0  UWB_BAUD=115200  CREW_ID=ev1  + MQTT_*
+
+  --simulate   circle around a 10 × 10 m habitat at 5 Hz (the old behaviour)
 """
-import time
+import argparse
 import json
 import logging
-import random
 import math
-import paho.mqtt.client as mqtt
 import os
+import random
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from eva_mqtt import connect, crew_id  # noqa: E402
+from hw import env_int, simulate_requested  # noqa: E402
+from positioning import parse_dwm_lec  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [uwb_driver] %(message)s")
 log = logging.getLogger(__name__)
 
-MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+TOPIC = "habitat/eva/uwb"
+GRID_W = GRID_H = 10.0
 
-# Habitat grid bounds (meters)
-GRID_W = 10.0
-GRID_H = 10.0
 
-def sim_uwb_position(step: int):
-    """Simulate a crew member walking a deterministic arc around the habitat."""
-    t = step * 0.2                          # 5 Hz → 0.2 s step
-    radius = 3.5
-    cx, cy = GRID_W / 2, GRID_H / 2
-    x = round(cx + radius * math.cos(t * 0.3) + random.uniform(-0.03, 0.03), 3)
-    y = round(cy + radius * math.sin(t * 0.3) + random.uniform(-0.03, 0.03), 3)
-    z = round(1.2 + random.uniform(-0.02, 0.02), 3)  # standing height ≈ 1.2 m
-    return x, y, z
+def positions_from_dwm1001():
+    import serial
+    port, baud = os.getenv("UWB_PORT", "/dev/ttyACM0"), env_int("UWB_BAUD", 115200)
+    with serial.Serial(port, baud, timeout=2) as ser:
+        ser.write(b"\r")
+        time.sleep(0.1)
+        ser.write(b"\r")          # two Enters within 1 s open the shell
+        time.sleep(1.0)
+        ser.reset_input_buffer()
+        ser.write(b"lec\r")       # start CSV position output
+        log.info("DWM1001 shell on %s: lec output started", port)
+        silent_since = time.monotonic()
+        while True:
+            line = ser.readline().decode("ascii", "replace")
+            pos = parse_dwm_lec(line) if line else None
+            if pos:
+                silent_since = time.monotonic()
+                yield pos
+            elif time.monotonic() - silent_since > 10:
+                log.warning("No UWB position for 10 s (anchors in range? tag in shell mode?); re-sending lec")
+                ser.write(b"lec\r")
+                silent_since = time.monotonic()
 
-def main():
-    client = mqtt.Client(client_id="uwb-driver")
-    client.connect(MQTT_HOST, MQTT_PORT, 60)
-    client.loop_start()
-    log.info("UWB Driver online. Publishing to habitat/eva/uwb at 5 Hz.")
 
+def positions_simulated():
     step = 0
     while True:
-        x, y, z = sim_uwb_position(step)
-        quality = random.randint(85, 100)      # dilution-of-precision proxy
-        payload = json.dumps({
-            "crew_id": "EV1",
-            "source": "uwb",
-            "x_m": x,
-            "y_m": y,
-            "z_m": z,
-            "quality": quality,
-            "timestamp": int(time.time())
-        })
-        client.publish("habitat/eva/uwb", payload)
-        log.debug(f"UWB  x={x} y={y} q={quality}")
+        t = step * 0.2
+        yield {"x_m": round(GRID_W / 2 + 3.5 * math.cos(t * 0.3) + random.uniform(-0.03, 0.03), 3),
+               "y_m": round(GRID_H / 2 + 3.5 * math.sin(t * 0.3) + random.uniform(-0.03, 0.03), 3),
+               "z_m": round(1.2 + random.uniform(-0.02, 0.02), 3),
+               "quality": random.randint(85, 100)}
         step += 1
-        time.sleep(0.2)  # 5 Hz
+        time.sleep(0.2)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--simulate", action="store_true")
+    args = p.parse_args()
+    crew = crew_id()
+    client = connect(f"uwb-{crew}")
+    source = positions_simulated() if simulate_requested(args.simulate) else positions_from_dwm1001()
+    log.info("UWB for %s → %s", crew, TOPIC)
+    for pos in source:
+        client.publish(TOPIC, json.dumps({"crew_id": crew, "source": "uwb", **pos, "timestamp": int(time.time())}))
+
 
 if __name__ == "__main__":
     main()

@@ -12,9 +12,10 @@ import time
 import json
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from mqtt_publisher import MODES, make_publisher  # noqa: E402
 
-I2C_PORT = 1
-BME280_ADDRESS = 0x76
+I2C_PORT = int(os.getenv("I2C_BUS", "1"))
+BME280_ADDRESS = int(os.getenv("BME280_ADDRESS", "0x76"), 16)   # 0x77 on Adafruit-style boards (SDO high)
 MQTT_TOPIC = "habitat/sensors/bme280/zone1"
 
 
@@ -46,15 +47,10 @@ def read_loop(publish_fn):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    parser.add_argument("--mode", choices=MODES, default="stdout")
     args = parser.parse_args()
 
-    if args.mode == "mqtt":
-        from mqtt_publisher import create_client, publish as mqtt_pub
-        client = create_client()
-        publish_fn = lambda p: mqtt_pub(client, MQTT_TOPIC, p)
-    else:
-        publish_fn = lambda p: print(json.dumps(p), flush=True)
+    publish_fn = make_publisher(args.mode, MQTT_TOPIC)
 
     read_loop(publish_fn)
 

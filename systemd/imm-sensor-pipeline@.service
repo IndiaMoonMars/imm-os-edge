@@ -6,12 +6,15 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/imm-os-edge
+# Shared node config + secrets (see edge.env.example); optional
+EnvironmentFile=-/etc/imm-os/edge.env
 Environment="IMM_SECRET_KEY=default-dev-secret"
 Environment="IMM_BLACKBOX_DIR=/var/lib/imm-os/blackbox"
 
-# The %i parameter will be replaced by the sensor driver script name 
-# (e.g. 'bme280_driver.py')
-ExecStart=/bin/sh -c 'python3 sensor_drivers/%i | python3 core/encryption_layer.py | python3 core/blackbox_logger.py'
+# %i is the sensor driver script name (e.g. 'bme280_driver.py').
+# --mode both: publish each reading to the MCC broker AND pipe it into the local
+# encrypted blackbox (kept for 48 h, replayable after a network outage).
+ExecStart=/bin/sh -c 'python3 sensor_drivers/%i --mode both | python3 core/encryption_layer.py | python3 core/blackbox_logger.py'
 
 Restart=always
 RestartSec=10

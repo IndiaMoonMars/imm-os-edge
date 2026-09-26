@@ -28,6 +28,7 @@ NODES = [
         "id": "node-rpi-01",
         "type": "rpi",
         "location": "Habitat Zone A",
+        "zone": "zone_a",
         "hardware": "Raspberry Pi 4 (4GB)",
         # Simulation parameters only — not used with real sensors
         "temp_base": 22.5,
@@ -39,6 +40,7 @@ NODES = [
         "id": "node-rpi-02",
         "type": "rpi",
         "location": "Habitat Zone B",
+        "zone": "zone_b",
         "hardware": "Raspberry Pi 4 (4GB)",
         "temp_base": 23.1,
         "humidity_base": 52.0,
@@ -46,19 +48,20 @@ NODES = [
         "co2_base": 480,
     },
     {
-        "id": "node-jetson",
-        "type": "jetson",
-        "location": "Edge AI Node",
-        "hardware": "NVIDIA Jetson Orin Nano (8GB)",
+        "id": "node-compute",
+        "type": "compute",
+        "location": "Compute / Power",
+        "zone": "compute",
+        "hardware": "Raspberry Pi 5 (8GB)",
         # Simulation parameters
-        "cpu_temp_base": 45.0,
-        "gpu_temp_base": 52.0,
-        "power_base": 12.0,
+        "cpu_temp_base": 52.0,
+        "power_base": 6.5,
     },
 ]
 
 # ── MQTT Topic Schema (reference) ────────────────────────────────
-# imm/habitat/{node_id}/telemetry/{measurement}  — sensor readings
+# habitat/sensors/{sensor}/{zone}                — sensor readings (drivers + simulator)
+# imm/habitat/{node_id}/telemetry/{measurement}  — legacy per-node format (SIM_LEGACY_TOPICS)
 # imm/habitat/{node_id}/status                   — node heartbeat
 # imm/mcc/command/{subsystem}                    — MCC → Edge commands
 # imm/mcc/ack/{command_id}                       — Edge → MCC ack

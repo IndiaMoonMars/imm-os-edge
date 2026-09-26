@@ -13,7 +13,7 @@ Supported sensors (add/remove as needed):
   - O2:                   KE-25F (analog via ADC), ME2-O2
 
 Install dependencies:
-  pip install paho-mqtt RPi.GPIO smbus2 bme280 mh-z19
+  pip install paho-mqtt gpiozero lgpio smbus2 bme280 mh-z19   (not RPi.GPIO: it does not work on a Pi 5)
 """
 
 import json
@@ -161,6 +161,11 @@ def publish_readings(client: mqtt.Client):
 
 def main():
     client = mqtt.Client(client_id=f"imm-rpi-{NODE_ID}")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
+    if os.getenv("MQTT_TLS_CA"):  # broker TLS listener (8883); verifies cert + hostname
+        client.tls_set(ca_certs=os.getenv("MQTT_TLS_CA"))
     client.on_connect = on_connect
     client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
     client.loop_start()

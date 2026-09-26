@@ -1,73 +1,106 @@
 #!/usr/bin/env python3
 """
-GPS Driver — Parses NMEA GPRMC strings from u-blox NEO-M9N via UART.
-In simulation mode, generates synthetic lat/lon that slowly drifts (mock outdoor EVA traversal).
+GPS driver — u-blox NEO-M9N over UART, NMEA output.
+
+Reads RMC (position, validity) and GGA (fix quality, satellites, altitude) sentences,
+drops anything with a bad checksum or no fix, and publishes one frame per RMC to
+habitat/eva/gps for position fusion.
+
+Wiring: M9N TX → Pi RX (GPIO15), RX → TX (GPIO14), 3.3 V, GND; enable the UART and
+disable the serial console (raspi-config). The M9N defaults to 38400 baud.
+
+Environment:
+  GPS_PORT (default: header UART — /dev/ttyAMA0 on a Pi 5, /dev/serial0 otherwise)  GPS_BAUD=38400  CREW_ID=ev1  + MQTT_*
+
+  --simulate   drifting fix near the default base location (the old behaviour)
 """
-import time
-import math
+import argparse
 import json
 import logging
-import random
-import paho.mqtt.client as mqtt
 import os
+import random
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from eva_mqtt import connect, crew_id  # noqa: E402
+from hw import env_int, simulate_requested, uart_port  # noqa: E402
+from positioning import parse_nmea  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [gps_driver] %(message)s")
 log = logging.getLogger(__name__)
 
-MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+TOPIC = "habitat/eva/gps"
+# Simulation base location (outdoor analog site near Bengaluru)
+BASE_LAT, BASE_LON = 12.9716, 77.5946
 
-# Base location: simulate outdoor habitat lat/lon near Bengaluru
-BASE_LAT = 12.9716
-BASE_LON = 77.5946
 
-def parse_gprmc(sentence: str):
-    """Parse NMEA GPRMC sentence into lat/lon. Returns (lat, lon) or None."""
-    parts = sentence.split(',')
-    if len(parts) < 7 or parts[2] != 'A':
-        return None
-    try:
-        raw_lat = float(parts[3]); lat_dir = parts[4]
-        raw_lon = float(parts[5]); lon_dir = parts[6]
-        lat = int(raw_lat / 100) + (raw_lat % 100) / 60.0
-        lon = int(raw_lon / 100) + (raw_lon % 100) / 60.0
-        if lat_dir == 'S': lat = -lat
-        if lon_dir == 'W': lon = -lon
-        return lat, lon
-    except Exception:
-        return None
+class GpsFix:
+    """Merge RMC and GGA sentences into publishable frames (pure logic, testable)."""
 
-def sim_gprmc(step: int):
-    """Generate a drifting NMEA GPRMC sentence for mock outdoor EVA traversal."""
-    drift_lat = BASE_LAT + step * 0.00001
-    drift_lon = BASE_LON + step * 0.00002 + random.uniform(-0.000005, 0.000005)
-    dd_lat = int(drift_lat) * 100 + (drift_lat % 1) * 60
-    dd_lon = int(drift_lon) * 100 + (drift_lon % 1) * 60
-    return f"$GPRMC,123519,A,{dd_lat:.4f},N,{dd_lon:.4f},E,022.4,084.4,230394,003.1,W*6A"
+    def __init__(self, crew: str):
+        self.crew = crew
+        self.gga = {}
 
-def main():
-    client = mqtt.Client(client_id="gps-driver")
-    client.connect(MQTT_HOST, MQTT_PORT, 60)
-    client.loop_start()
-    log.info("GPS Driver online. Publishing to habitat/eva/gps at 1 Hz.")
+    def feed(self, sentence: str):
+        parsed = parse_nmea(sentence)
+        if not parsed:
+            return None
+        if parsed["type"] == "GGA":
+            self.gga = parsed
+            return None
+        frame = {"crew_id": self.crew, "source": "gps",
+                 "lat": round(parsed["lat"], 7), "lon": round(parsed["lon"], 7),
+                 "speed_kn": parsed["speed_kn"], "timestamp": int(time.time())}
+        if self.gga:
+            frame.update(satellites=self.gga["satellites"], hdop=self.gga["hdop"], alt_m=self.gga["alt_m"])
+        return frame
 
+
+def sentences_from_serial():
+    import serial
+    port, baud = uart_port("GPS_PORT"), env_int("GPS_BAUD", 38400)
+    log.info("Reading NMEA from %s @ %d", port, baud)
+    with serial.Serial(port, baud, timeout=2) as ser:
+        while True:
+            line = ser.readline().decode("ascii", "replace").strip()
+            if line:
+                yield line
+
+
+def sentences_simulated():
     step = 0
     while True:
-        sentence = sim_gprmc(step)
-        result = parse_gprmc(sentence)
-        if result:
-            lat, lon = result
-            payload = json.dumps({
-                "crew_id": "EV1",
-                "source": "gps",
-                "lat": round(lat, 6),
-                "lon": round(lon, 6),
-                "timestamp": int(time.time())
-            })
-            client.publish("habitat/eva/gps", payload)
-            log.info(f"GPS  lat={lat:.6f} lon={lon:.6f}")
+        lat = BASE_LAT + step * 0.00001
+        lon = BASE_LON + step * 0.00002 + random.uniform(-0.000005, 0.000005)
+        dd_lat = int(lat) * 100 + (lat % 1) * 60
+        dd_lon = int(lon) * 100 + (lon % 1) * 60
+        body = f"GNRMC,123519,A,{dd_lat:.5f},N,{dd_lon:.5f},E,0.4,84.4,250926,,,A"
+        cs = 0
+        for ch in body:
+            cs ^= ord(ch)
+        yield f"${body}*{cs:02X}"
         step += 1
         time.sleep(1.0)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--simulate", action="store_true")
+    args = p.parse_args()
+    fix = GpsFix(crew_id())
+    client = connect(f"gps-{fix.crew}")
+    source = sentences_simulated() if simulate_requested(args.simulate) else sentences_from_serial()
+    log.info("GPS for %s → %s", fix.crew, TOPIC)
+    last_log = 0.0
+    for sentence in source:
+        frame = fix.feed(sentence)
+        if frame:
+            client.publish(TOPIC, json.dumps(frame))
+            if time.monotonic() - last_log > 10:
+                log.info("fix %.6f, %.6f (%s sats)", frame["lat"], frame["lon"], frame.get("satellites", "?"))
+                last_log = time.monotonic()
+
 
 if __name__ == "__main__":
     main()
