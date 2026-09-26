@@ -99,6 +99,21 @@ def test_setup_reads_secrets_file(tmp_path):
     assert secrets.exists()                     # a dry run deletes nothing
 
 
+def test_setup_adds_mcc_to_cloud_init_hosts_template(tmp_path, monkeypatch):
+    """cloud-init rewrites /etc/hosts at boot; the entry must be in its template too."""
+    tpl = tmp_path / "templates"
+    tpl.mkdir()
+    (tpl / "hosts.debian.tmpl").write_text("## template:jinja\n127.0.0.1 localhost\n")
+    (tmp_path / "hosts").write_text("127.0.0.1 localhost\n")
+    secrets = tmp_path / "secrets"
+    secrets.write_text("IMM_EDGE_CLIENT_SECRET=a\nMQTT_PASSWORD=b\n")
+    monkeypatch.setenv("IMM_CLOUD_HOSTS_TEMPLATES", str(tpl))
+    out = _setup_dry(tmp_path, "--secrets-file", str(secrets))
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert f"append '192.168.1.20 imm.local' to {tmp_path / 'hosts'}" in out.stdout
+    assert f"append '192.168.1.20 imm.local' to {tpl / 'hosts.debian.tmpl'}" in out.stdout
+
+
 def test_setup_secrets_file_must_have_both(tmp_path):
     secrets = tmp_path / "secrets"
     secrets.write_text("IMM_EDGE_CLIENT_SECRET=abc\n")

@@ -387,6 +387,31 @@ def main(argv=None) -> int:
     return bringup(args.sensor, known[args.sensor], args.count, args.python)
 
 
+def stm32_answers(port: str, wait_s: float = 2.5) -> bool:
+    """Does the MQ-7 controller reply on this UART? The firmware answers STATUS at once.
+
+    Only a line that looks like the firmware's (``#`` diagnostics or ``CO:``) counts: an
+    unconnected RX pin can pick up noise."""
+    try:
+        import serial
+        ser = serial.Serial(port, 115200, timeout=0.5)     # BAUD_RATE in mq7_uart_bridge.py
+    except Exception:
+        return False
+    try:
+        ser.reset_input_buffer()
+        ser.write(b"STATUS\n")
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            line = ser.readline().decode("ascii", "replace").strip()
+            if line.startswith(("#", "CO:")):
+                return True
+    except Exception:
+        return False
+    finally:
+        ser.close()
+    return False
+
+
 def connected(sensor: Sensor, found_i2c, uart_present: bool) -> bool:
     """Is this sensor's hardware visible? (Doesn't prove it works; bringup() does that.)"""
     if sensor.uart:
@@ -400,7 +425,8 @@ def bringup_all(known: dict, count: int, python: str) -> int:
         found = set(i2c_scan(open_i2c()))
     except OSError:
         found = set()
-    uart = os.path.exists(os.getenv("MQ7_PORT") or default_uart())
+    port = os.getenv("MQ7_PORT") or default_uart()
+    uart = os.path.exists(port) and stm32_answers(port)    # the port always exists on a Pi; is the STM32 on it?
     results = []
     for name, sensor in sorted(known.items()):
         if not connected(sensor, found, uart):

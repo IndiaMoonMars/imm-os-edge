@@ -91,7 +91,11 @@ check() {   # check "label" command...
     local label="$1"; shift
     if out=$("$@" 2>&1); then echo "  ✓ $label${out:+ — $out}"; else echo "  ✗ $label${out:+ — $out}"; FAILS=$((FAILS + 1)); fi
 }
-chk_time()   { [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] || { echo "clock not NTP-synced (readings >7 days off are rejected)"; return 1; }; }
+ntp_synced() { [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; }
+chk_time()   {   # right after boot the first NTP sync can take a little while
+    local i; for i in $(seq "${IMM_NTP_WAIT_S:-60}"); do ntp_synced && return 0; sleep 1; done
+    ntp_synced || { echo "clock not NTP-synced (readings >7 days off are rejected)"; return 1; }
+}
 chk_name()   { getent hosts "$1" | awk '{print $1}' | head -1 | grep . || { echo "$1 does not resolve"; return 1; }; }
 chk_port()   { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null && echo "port $2 open" || { echo "cannot reach $1:$2"; return 1; }; }
 chk_mqtt() {
@@ -317,18 +321,27 @@ fi
 # ── 6. MCC name resolution ────────────────────────────────────────
 if [ -n "$MCC_IP" ]; then
     step "Hosts file"
-    if grep -qE "^[0-9.]+[[:space:]]+$NAME_RE([[:space:]]|$)" "$HOSTS_FILE"; then
-        current=$(awk -v n="$MCC_NAME" '$0 !~ /^#/ {for(i=2;i<=NF;i++) if($i==n) print $1}' "$HOSTS_FILE" | head -1)
-        if [ "$current" != "$MCC_IP" ]; then
-            run sed -i -E "s#^[0-9.]+([[:space:]]+)$NAME_RE([[:space:]]|\$)#$MCC_IP\1$MCC_NAME\2#" "$HOSTS_FILE"
-            ok "$MCC_NAME → $MCC_IP (was $current)"
+    set_host_entry() {   # set_host_entry FILE LABEL
+        local file="$1" label="$2" current
+        if grep -qE "^[0-9.]+[[:space:]]+$NAME_RE([[:space:]]|$)" "$file"; then
+            current=$(awk -v n="$MCC_NAME" '$0 !~ /^#/ {for(i=2;i<=NF;i++) if($i==n) print $1}' "$file" | head -1)
+            if [ "$current" != "$MCC_IP" ]; then
+                run sed -i -E "s#^[0-9.]+([[:space:]]+)$NAME_RE([[:space:]]|\$)#$MCC_IP\1$MCC_NAME\2#" "$file"
+                ok "$label: $MCC_NAME → $MCC_IP (was $current)"
+            else
+                ok "$label: $MCC_NAME → $MCC_IP already"
+            fi
         else
-            ok "$MCC_NAME → $MCC_IP already"
+            if [ "$DRY" = 1 ]; then echo "  + append '$MCC_IP $MCC_NAME' to $file"; else echo "$MCC_IP $MCC_NAME" >> "$file"; fi
+            ok "$label: $MCC_NAME → $MCC_IP added"
         fi
-    else
-        if [ "$DRY" = 1 ]; then echo "  + append '$MCC_IP $MCC_NAME' to $HOSTS_FILE"; else echo "$MCC_IP $MCC_NAME" >> "$HOSTS_FILE"; fi
-        ok "$MCC_NAME → $MCC_IP added"
-    fi
+    }
+    set_host_entry "$HOSTS_FILE" "$HOSTS_FILE"
+    # Raspberry Pi OS set up by Imager 2 uses cloud-init, which rewrites /etc/hosts from
+    # a template at every boot; without the entry there too, it's gone after a reboot.
+    for tmpl in "${IMM_CLOUD_HOSTS_TEMPLATES:-/etc/cloud/templates}"/hosts.*.tmpl; do
+        if [ -f "$tmpl" ]; then set_host_entry "$tmpl" "cloud-init template $(basename "$tmpl")"; fi
+    done
 fi
 
 # ── 7. Services ───────────────────────────────────────────────────

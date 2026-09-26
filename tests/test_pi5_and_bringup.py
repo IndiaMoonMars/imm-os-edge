@@ -326,3 +326,50 @@ def test_bringup_all_only_runs_connected_sensors(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "✗ scd40" in out and "· mq7" in out and '--sensors "bme280_driver.py"' in out
     assert rc == 1
+
+
+def test_bringup_all_probes_the_uart_for_the_stm32(monkeypatch, capsys):
+    """A Pi always has the UART; the MQ-7 counts only when the STM32 answers on it."""
+    table = {"mq7": bringup.sensors()["mq7"]}
+    monkeypatch.setattr(bringup, "i2c_scan", lambda bus: [])
+    monkeypatch.setattr(bringup, "open_i2c", lambda: None)
+    monkeypatch.setattr(bringup.os.path, "exists", lambda p: True)
+    ran = []
+    monkeypatch.setattr(bringup, "bringup", lambda name, s, c, py: ran.append(name) or 0)
+    monkeypatch.setattr(bringup, "stm32_answers", lambda port: False)
+    bringup.bringup_all(table, 1, "python3")
+    assert ran == [] and "· mq7" in capsys.readouterr().out
+    monkeypatch.setattr(bringup, "stm32_answers", lambda port: True)
+    bringup.bringup_all(table, 1, "python3")
+    assert ran == ["mq7"]
+
+
+class FakeSerialPort:
+    def __init__(self, lines):
+        self.lines, self.written = list(lines), b""
+
+    def reset_input_buffer(self):
+        pass
+
+    def write(self, data):
+        self.written += data
+
+    def readline(self):
+        return self.lines.pop(0) if self.lines else b""
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("lines, expected", [
+    ([b"# phase=5.0V elapsed_s=3 r0=1000 cycles=0\n"], True),
+    ([b"", b"CO:3.1\n"], True),
+    ([b"\x00\xff\x13junk\n"], False),           # noise on an unconnected RX pin
+    ([], False),
+])
+def test_stm32_answers(monkeypatch, lines, expected):
+    port = FakeSerialPort(lines)
+    monkeypatch.setitem(sys.modules, "serial", type(sys)("serial"))
+    sys.modules["serial"].Serial = lambda *a, **kw: port
+    assert bringup.stm32_answers("/dev/ttyAMA0", wait_s=0.3) is expected
+    assert port.written == b"STATUS\n"

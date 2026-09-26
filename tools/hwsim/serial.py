@@ -17,6 +17,8 @@ class Serial:
     def write(self, data):
         if data.strip().upper() == b"CAL":
             self._pending.append(b"# CAL: R0 is set at the end of this cycle (keep the sensor in clean air)\n")
+        elif data.strip().upper() == b"STATUS":
+            self._pending.append(b"# phase=5.0V elapsed_s=12 r0=1000 cycles=3\n")
         return len(data)
 
     def readline(self):
