@@ -9,8 +9,8 @@
 #        --sensors "bme280_driver.py scd40_driver.py o2_driver.py" \
 #        --eclss "eclss_pid" --eva ""
 #
-# Secrets are read from the environment or prompted for (never passed as arguments,
-# so they don't end up in shell history or `ps`):
+# Secrets are read from --secrets-file, the environment or prompted for (never passed as
+# arguments, so they don't end up in shell history or `ps`):
 #   IMM_EDGE_CLIENT_SECRET   (IMM_EDGE_CLIENT_SECRET in imm-os-infra/.env)
 #   MQTT_PASSWORD            (MQTT_EDGE_PASSWORD in imm-os-infra/.env)
 #
@@ -23,6 +23,7 @@
 #   --mcc-ip IP          LAN address of the MCC server (required unless --mcc-name resolves)
 #   --mcc-name NAME      name in the MCC's TLS certificate (default imm.local)
 #   --ca FILE            the MCC's MQTT CA certificate (required on first setup)
+#   --secrets-file FILE  read the secrets below from FILE (KEY=value lines), then delete it
 #   --sensors "…"        sensor_drivers/ to run, e.g. "bme280_driver.py scd40_driver.py"
 #                        (sysmon_driver.py, the node health report, is always added)
 #   --no-sysmon          don't add sysmon_driver.py
@@ -42,7 +43,7 @@ CONF_DIR="${IMM_CONF_DIR:-/etc/imm-os}"
 ENV_FILE="$CONF_DIR/edge.env"
 HOSTS_FILE="${IMM_HOSTS_FILE:-/etc/hosts}"
 
-NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID=""
+NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID="" SECRETS_FILE=""
 SENSORS="__unset__" ECLSS="__unset__" EVA="__unset__"
 SVC_USER="${SUDO_USER:-}"
 SKIP_APT=0 SKIP_IF=0 NO_SERVICES=0 CHECK_ONLY=0 DRY=0 NO_SYSMON=0
@@ -61,6 +62,7 @@ while [ $# -gt 0 ]; do
         --mcc-ip) MCC_IP="$2"; shift 2 ;;
         --mcc-name) MCC_NAME="$2"; shift 2 ;;
         --ca) CA="$2"; shift 2 ;;
+        --secrets-file) SECRETS_FILE="$2"; shift 2 ;;
         --sensors) SENSORS="$2"; shift 2 ;;
         --eclss) ECLSS="$2"; shift 2 ;;
         --eva) EVA="$2"; shift 2 ;;
@@ -79,7 +81,7 @@ done
 
 [ "$DRY" = 1 ] || [ "$EUID" -eq 0 ] || die "run with sudo"
 envget() { python3 "$REPO/tools/envfile.py" --get "$ENV_FILE" "$1" 2>/dev/null || true; }
-MODEL=$(tr -d '\0' < "${IMM_MODEL_FILE:-/proc/device-tree/model}" 2>/dev/null || true)
+MODEL=$(tr -d '\0' 2>/dev/null < "${IMM_MODEL_FILE:-/proc/device-tree/model}" || true)
 IS_PI5=0; case "$MODEL" in *"Raspberry Pi 5"*) IS_PI5=1 ;; esac
 BOOT_CONFIG="${IMM_BOOT_CONFIG:-/boot/firmware/config.txt}"; [ -f "$BOOT_CONFIG" ] || BOOT_CONFIG=/boot/config.txt
 
@@ -195,6 +197,16 @@ secret_input() {   # secret_input VAR "prompt"
 }
 NAME_RE=$(printf '%s' "$MCC_NAME" | sed 's/[.]/\\./g')
 step "Secrets"
+if [ -n "$SECRETS_FILE" ]; then   # plain KEY=value lines; never sourced, so values can't run code
+    [ -f "$SECRETS_FILE" ] || die "--secrets-file $SECRETS_FILE not found"
+    for v in IMM_EDGE_CLIENT_SECRET MQTT_PASSWORD; do
+        val=$(sed -n "s/^$v=//p" "$SECRETS_FILE" | tr -d '\r' | head -1)
+        [ -n "$val" ] || die "$v missing from $SECRETS_FILE"
+        printf -v "$v" '%s' "$val"
+    done
+    [ "$DRY" = 1 ] || rm -f "$SECRETS_FILE"
+    ok "secrets read from $SECRETS_FILE"
+fi
 secret_input IMM_EDGE_CLIENT_SECRET "IMM_EDGE_CLIENT_SECRET (from imm-os-infra/.env)"
 secret_input MQTT_PASSWORD "MQTT_PASSWORD (MQTT_EDGE_PASSWORD from imm-os-infra/.env)"
 ok "secrets provided (not shown)"

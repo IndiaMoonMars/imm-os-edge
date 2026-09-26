@@ -75,6 +75,40 @@ def test_envfile_updates_in_place_and_quotes(tmp_path):
     assert out == 'core:0,1;galley:2,3|a$b"c'
 
 
+def _setup_dry(tmp_path, *args):
+    """setup-node.sh --dry-run as the current user, with /etc/imm-os redirected to tmp_path."""
+    conf = tmp_path / "conf"
+    conf.mkdir(exist_ok=True)
+    (conf / "mqtt-ca.crt").write_text("already installed")   # so --ca isn't required
+    env = dict(os.environ, IMM_CONF_DIR=str(conf), IMM_HOSTS_FILE=str(tmp_path / "hosts"),
+               IMM_MODEL_FILE=str(tmp_path / "model"), IMM_BOOT_CONFIG=str(tmp_path / "config.txt"))
+    env.pop("IMM_EDGE_CLIENT_SECRET", None)
+    env.pop("MQTT_PASSWORD", None)
+    user = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
+    return subprocess.run(["bash", os.path.join(ROOT, "scripts", "setup-node.sh"), "--dry-run", "--user", user,
+                           "--node-id", "node-rpi-01", "--zone", "zone_a", "--mcc-ip", "192.168.1.20", *args],
+                          capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL, timeout=60)
+
+
+def test_setup_reads_secrets_file(tmp_path):
+    secrets = tmp_path / "secrets"
+    secrets.write_text('IMM_EDGE_CLIENT_SECRET=ab$cd e"f\r\nMQTT_PASSWORD=p$w d\r\n')   # CRLF from Windows
+    out = _setup_dry(tmp_path, "--secrets-file", str(secrets))
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert f"secrets read from {secrets}" in out.stdout
+    assert secrets.exists()                     # a dry run deletes nothing
+
+
+def test_setup_secrets_file_must_have_both(tmp_path):
+    secrets = tmp_path / "secrets"
+    secrets.write_text("IMM_EDGE_CLIENT_SECRET=abc\n")
+    out = _setup_dry(tmp_path, "--secrets-file", str(secrets))
+    assert out.returncode != 0
+    assert "MQTT_PASSWORD missing" in out.stderr
+    missing = _setup_dry(tmp_path, "--secrets-file", str(tmp_path / "nope"))
+    assert missing.returncode != 0 and "not found" in missing.stderr
+
+
 # ── MAX30100 driver ────────────────────────────────────────────────
 
 class FakeMax30100Bus:

@@ -3,7 +3,16 @@ Sensor, ECLSS and EVA code for the IMM-OS edge nodes (Raspberry Pi 4 / Pi 5, STM
 
 ## Set up a node
 
-On a fresh Raspberry Pi OS Lite (64-bit) install, with the MCC stack running:
+From the MCC PC (Windows, with the stack running), after flashing Raspberry Pi OS Lite
+(64-bit) with SSH enabled:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\provision-pi.ps1 -PiUser <username from Imager>
+```
+
+This runs everything below over SSH, then reboots, checks and switches the node's
+simulated health data off: see step 0 in [real-sensors/BENCH.md](real-sensors/BENCH.md).
+By hand, on the Pi:
 
 ```bash
 git clone https://github.com/IndiaMoonMars/imm-os-edge.git && cd imm-os-edge
@@ -12,7 +21,8 @@ sudo ./scripts/setup-node.sh --node-id node-rpi-01 --zone zone_a --mcc-ip 192.16
      --ca /tmp/ca.crt --sensors "bme280_driver.py scd40_driver.py o2_driver.py" --eclss "eclss_pid"
 ```
 
-It asks for `IMM_EDGE_CLIENT_SECRET` and `MQTT_PASSWORD` (from `imm-os-infra/.env`),
+It asks for `IMM_EDGE_CLIENT_SECRET` and `MQTT_PASSWORD` (from `imm-os-infra/.env`;
+or `--secrets-file FILE`),
 installs packages and a Python venv, enables I2C/SPI/UART/1-Wire, writes
 `/etc/imm-os/edge.env`, the CA and `calibration.yaml`, points `imm.local` at the MCC,
 starts the services and checks clock, MQTT (TLS + login), Keycloak and the I2C bus.

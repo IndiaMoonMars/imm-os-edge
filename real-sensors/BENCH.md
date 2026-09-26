@@ -38,7 +38,26 @@ Header pins used: **1** 3.3 V · **2/4** 5 V · **3** SDA · **5** SCL · **6/9/
 
 ## Step 0: set up the Pi 5 (no sensors yet)
 
-Flash Raspberry Pi OS Lite 64-bit (Imager: hostname, user, SSH, Wi-Fi), then:
+Flash Raspberry Pi OS Lite 64-bit with Raspberry Pi Imager. In its settings, set the
+hostname `node-rpi-01`, a username and password, SSH on, and your Wi-Fi. Boot the Pi and
+wait 2–3 minutes. Then, on the MCC PC, in PowerShell:
+
+```powershell
+cd C:\Users\<you>\Documents\imm-os-edge
+powershell -ExecutionPolicy Bypass -File .\scripts\provision-pi.ps1 -PiUser <username from Imager>
+```
+
+It does the whole setup over SSH and asks only for the Pi's password, once:
+- **Pi and LAN:** it finds the Pi and this PC's LAN address, and sets up SSH key login.
+- **Firewall:** it opens ports 80 and 8883 in the Windows firewall, but only when run as Administrator.
+- **Setup:** it copies this checkout and the MQTT CA, then runs `setup-node.sh` with the secrets from `imm-os-infra\.env`, which never appear on a command line.
+- **Reboot and checks:** it reboots the Pi, then runs `setup-node.sh --check-only` and `tools/bringup.py all`.
+- **Go live:** when the checks pass, it adds `node-rpi-01:sysmon` to `SIM_DISABLED_SENSORS` and restarts `sensor-sim`. The Sensors tab then shows node-rpi-01's Node health as **LIVE**: real data through TLS → Kafka → InfluxDB → dashboard, before any sensor is wired.
+
+It's safe to re-run. `-DryRun` shows what setup would do without changing anything, and
+`-PiHost <ip>` covers the case where `node-rpi-01.local` doesn't resolve.
+
+Doing it by hand on the Pi instead:
 
 ```bash
 git clone https://github.com/IndiaMoonMars/imm-os-edge.git && cd imm-os-edge
@@ -50,10 +69,8 @@ sudo ./scripts/setup-node.sh --check-only
 sudo .venv/bin/python tools/bringup.py            # board, power supply, buses
 ```
 
-`sysmon_driver.py` is already running. On the MCC, set
-`SIM_DISABLED_SENSORS=node-rpi-01:sysmon` in `imm-os-infra/.env` and run
-`docker compose up -d sensor-sim`. The Overview's Node health panel shows node-rpi-01 as
-**LIVE**: real data through TLS → Kafka → InfluxDB → dashboard, before any sensor is wired.
+Then, on the MCC, set `SIM_DISABLED_SENSORS=node-rpi-01:sysmon` in `imm-os-infra/.env` and
+run `docker compose up -d sensor-sim`.
 
 (The bench Pi uses the habitat node's identity, since most of these sensors belong to
 zone A. When the Pi 5 later moves to the compute/power role, re-run setup with
