@@ -121,9 +121,10 @@ ADS1115 #1: VDD 3.3 V, GND, SDA, SCL, **ADDR → GND (0x48)**. AD8232: 3.3 V, GN
 `bringup.py ecg`.
 **Reference check:** with electrodes on, the value moves with each heartbeat.
 
-> ECG streams 250 samples/s. That's fine on the bench, but it's the heaviest stream in the
-> pipeline, and the MCC (InfluxDB on the Windows PC) hasn't been load-tested at that rate.
-> Enable it in `IMM_SENSORS` only while you're monitoring someone.
+> ECG streams 100 samples/s by default (`ECG_SAMPLE_HZ`, up to 250), each with its own
+> millisecond timestamp. It's the heaviest stream in the pipeline. 100 Hz has been run
+> end-to-end through the stack, but the MCC (InfluxDB on the Windows PC) hasn't been
+> load-tested above that. Enable it in `IMM_SENSORS` only while you're monitoring someone.
 
 ### 9. MQ-7 (CO) via STM32
 Build, flash and wire per [firmware/stm32-mq7/README.md](../firmware/stm32-mq7/README.md).
