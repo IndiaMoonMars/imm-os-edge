@@ -122,3 +122,27 @@ def test_o2_calibration_and_commands(sim, tmp_path):
     assert any("unknown command" in n for n in notes)
     data, _ = sim(BASE.replace("o2 0 110 5 0", "o2 190 110 0 0") + "run 2\n", tmp_path)
     assert data[-1]["o2"]["o2_pct"] == pytest.approx(0.190 * 110, abs=0.01)    # stored key
+
+
+def test_bme280_settings_written_again_if_ignored_at_start(sim, tmp_path):
+    """A BME280 still starting up ignores writes: the firmware reads ctrl_meas back and retries."""
+    data, notes = sim("bmeignore 2\n" + BASE + "run 3\n", tmp_path)
+    assert not any("did not stick" in n for n in notes)
+    assert data[-1]["bme280"]["temp"] == 25.08
+
+
+def test_bme280_that_never_measures_is_explained_and_reinitialised(sim, tmp_path):
+    script = "bmeignore 100\n" + BASE.replace("bme 519888 415148 30000", "bme 524288 524288 32768") + "run 12\n"
+    data, notes = sim(script, tmp_path)
+    assert any("settings did not stick" in n for n in notes)
+    why = [n for n in notes if n.startswith("# bme280: no reading")]
+    assert why and "no measurement (ctrl_meas=0x00" in why[0]                    # the reason, with the register
+    assert "# bme280: re-initialising" in notes
+    assert all("bme280" not in d for d in data) and "bno055" in data[-1]          # the rest keeps reporting
+
+
+def test_scd40_co2_zero_is_left_out(sim, tmp_path):
+    data, notes = sim(BASE.replace("scd 612 26000 26214", "scd 0 26000 26214") + "run 12\n", tmp_path)
+    scd = [d["scd40"] for d in data if "scd40" in d]
+    assert scd and all("co2_ppm" not in s for s in scd) and scd[0]["temp"] == pytest.approx(24.43, abs=0.01)
+    assert sum("scd40: CO2 reads 0" in n for n in notes) == 1                    # said once, not every reading

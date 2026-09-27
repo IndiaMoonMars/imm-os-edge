@@ -9,6 +9,7 @@
 //     o2 KEY D0 D1 D2             SEN0322 key register and oxygen data registers
 //     remove DEV | add DEV        take a device off / put it back on the bus (bme scd bno o2)
 //     bmp                         the BME280 answers as a BMP280 (chip ID 0x58)
+//     bmeignore N                 the BME280 ignores its next N writes to ctrl_meas
 //     reset                       reboot the ESP32 (flash contents kept)
 //     o2user                      print what CAL_O2 wrote to the SEN0322
 // Everything the firmware prints goes to stdout.
@@ -36,9 +37,9 @@ struct RegDevice : I2CDevice {
   std::map<uint8_t, int> writes;                               // last value written per register
   void write(const std::vector<uint8_t>& b) override {
     ptr = b[0];
-    for (size_t i = 1; i < b.size(); i++) { writes[ptr] = b[i]; onWrite(ptr, b[i]); ptr++; }
+    for (size_t i = 1; i < b.size(); i++) { writes[ptr] = b[i]; if (accept(ptr, b[i])) reg[ptr] = b[i]; ptr++; }
   }
-  virtual void onWrite(uint8_t, uint8_t) {}
+  virtual bool accept(uint8_t, uint8_t) { return true; }   // false: the chip ignores this write
   std::vector<uint8_t> read(size_t n) override {
     std::vector<uint8_t> out;
     for (size_t i = 0; i < n; i++) out.push_back(reg[(uint8_t)(ptr + i)]);
@@ -49,6 +50,12 @@ struct RegDevice : I2CDevice {
 };
 
 struct Bme280Dev : RegDevice {
+  int ignoreCtrl = 0;                                          // ignore this many writes to ctrl_meas (0xF4)
+  bool accept(uint8_t r, uint8_t) override {
+    if (r == 0xE0) return false;                               // reset command, not a stored register
+    if (r == 0xF4 && ignoreCtrl > 0) { ignoreCtrl--; return false; }
+    return true;
+  }
   Bme280Dev() {
     reg[0xD0] = 0x60;
     // BME280 datasheet example calibration (T, P) and typical humidity trimming values
@@ -126,7 +133,7 @@ int main(int, char** argv) {
   while (std::getline(in, line)) {
     std::istringstream ss(line);
     std::string op; ss >> op;
-    if (!started && op != "remove" && op != "bmp" && op != "o2" && op != "mq4") { setup(); started = true; flush(); }
+    if (!started && op != "remove" && op != "bmp" && op != "o2" && op != "mq4" && op != "bmeignore") { setup(); started = true; flush(); }
     if (op == "run") {
       double s; ss >> s;
       const uint32_t end = sim::now_ms + (uint32_t)(s * 1000);
@@ -145,9 +152,10 @@ int main(int, char** argv) {
       o2Dev.reg[0x0A] = k; o2Dev.reg[0x03] = a; o2Dev.reg[0x04] = b; o2Dev.reg[0x05] = c;
     } else if (op == "remove" || op == "add") { std::string d; ss >> d; attach(d, op == "add"); }
     else if (op == "bmp") bmeDev.reg[0xD0] = 0x58;
+    else if (op == "bmeignore") ss >> bmeDev.ignoreCtrl;
     else if (op == "o2user") std::cout << "O2USER " << o2Dev.writes[0x08] << "\n";
     else if (op == "reset") {
-      bme.addr = 0; scdFound = false; bnoAddr = 0; o2Addr = 0; mq4R0 = 0; mq4CalLeft = 0; mq4CalSum = 0;
+      bme.addr = 0; bmeFails = 0; scdZeroes = 0; scdFound = false; bnoAddr = 0; o2Addr = 0; mq4R0 = 0; mq4CalLeft = 0; mq4CalSum = 0;
       lastSample = lastProbe = 0; cmdLen = 0; sim::now_ms = 0; scdDev.running = scdDev.running;   // the SCD40 keeps measuring
       setup();
     }

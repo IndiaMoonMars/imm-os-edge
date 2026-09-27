@@ -42,6 +42,7 @@ step "Build and flash (first build downloads the ESP32 toolchain)"
 "$PIO_HOME_VENV/bin/pio" run -d "$FW" -t upload --upload-port "$PORT"
 
 step "Board output (15 s)"
+sleep 1                                  # let the post-flash reset settle
 "$PY" - "$PORT" <<'EOF'
 import sys, time
 import serial

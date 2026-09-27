@@ -77,6 +77,18 @@ struct Bme280 {
   uint8_t H1, H3;
   int8_t H6;
 } bme;
+static const char* bmeWhy = "";         // why the last bmeRead() failed (diagnostics)
+static char bmeWhyBuf[96];
+
+// Write a register and read it back: the BME280 ignores writes while it is still starting up
+static bool writeRegVerified(uint8_t addr, uint8_t reg, uint8_t value, uint8_t mask) {
+  for (int i = 0; i < 3; i++) {
+    uint8_t got;
+    if (writeReg(addr, reg, value) && readRegs(addr, reg, &got, 1) && (got & mask) == (value & mask)) return true;
+    delay(10);
+  }
+  return false;
+}
 
 static bool bmeInit() {
   bme.addr = 0;
@@ -86,10 +98,11 @@ static bool bmeInit() {
     if (id == 0x58) { diag(a == 0x76 ? "bme280: 0x76 is a BMP280 (no humidity)" : "bme280: 0x77 is a BMP280 (no humidity)"); continue; }
     if (id != 0x60) continue;
     writeReg(a, 0xE0, 0xB6);                                    // soft reset
-    delay(5);
-    for (int i = 0; i < 20; i++) { uint8_t st; if (readRegs(a, 0xF3, &st, 1) && !(st & 0x01)) break; delay(2); }
+    delay(10);
+    for (int i = 0; i < 50; i++) { uint8_t st; if (readRegs(a, 0xF3, &st, 1) && !(st & 0x01)) break; delay(2); }
     uint8_t c[26], e[7];
-    if (!readRegs(a, 0x88, c, 26) || !readRegs(a, 0xE1, e, 7)) return false;
+    if (!readRegs(a, 0x88, c, 26) || !readRegs(a, 0xE1, e, 7)) { diag("bme280: calibration read failed"); return false; }
+    if ((c[0] | c[1] << 8) == 0 || (c[6] | c[7] << 8) == 0) { diag("bme280: calibration reads as zero"); return false; }
     bme.T1 = c[0] | c[1] << 8;  bme.T2 = (int16_t)(c[2] | c[3] << 8);  bme.T3 = (int16_t)(c[4] | c[5] << 8);
     bme.P1 = c[6] | c[7] << 8;  bme.P2 = (int16_t)(c[8] | c[9] << 8);  bme.P3 = (int16_t)(c[10] | c[11] << 8);
     bme.P4 = (int16_t)(c[12] | c[13] << 8); bme.P5 = (int16_t)(c[14] | c[15] << 8); bme.P6 = (int16_t)(c[16] | c[17] << 8);
@@ -100,9 +113,10 @@ static bool bmeInit() {
     bme.H4 = (int16_t)((int8_t)e[3] * 16 + (e[4] & 0x0F));
     bme.H5 = (int16_t)((int8_t)e[5] * 16 + (e[4] >> 4));
     bme.H6 = (int8_t)e[6];
-    writeReg(a, 0xF2, 0x01);                                    // humidity x1 (before ctrl_meas)
-    writeReg(a, 0xF5, 0xA0);                                    // 1 s standby, filter off
-    writeReg(a, 0xF4, 0x27);                                    // temp x1, pressure x1, normal mode
+    bool ok = writeRegVerified(a, 0xF2, 0x01, 0x07);            // humidity x1 (before ctrl_meas)
+    ok = writeRegVerified(a, 0xF5, 0xA0, 0xFC) && ok;           // 1 s standby, filter off
+    ok = writeRegVerified(a, 0xF4, 0x27, 0xFF) && ok;           // temp x1, pressure x1, normal mode
+    if (!ok) diag("bme280: settings did not stick (ctrl registers read back differently)");
     bme.addr = a;
     return true;
   }
@@ -111,11 +125,19 @@ static bool bmeInit() {
 
 static bool bmeRead(float& temp, float& hum, float& pres) {
   uint8_t d[8];
-  if (!bme.addr || !readRegs(bme.addr, 0xF7, d, 8)) return false;
+  if (!bme.addr) { bmeWhy = "not initialised"; return false; }
+  if (!readRegs(bme.addr, 0xF7, d, 8)) { bmeWhy = "data read failed (I2C)"; return false; }
   const int32_t adcP = (int32_t)d[0] << 12 | d[1] << 4 | d[2] >> 4;
   const int32_t adcT = (int32_t)d[3] << 12 | d[4] << 4 | d[5] >> 4;
   const int32_t adcH = (int32_t)d[6] << 8 | d[7];
-  if (adcT == 0x80000) return false;                            // no measurement yet
+  if (adcT == 0x80000) {                                        // measurement skipped / not started
+    uint8_t cm = 0, st = 0;
+    readRegs(bme.addr, 0xF4, &cm, 1);
+    readRegs(bme.addr, 0xF3, &st, 1);
+    snprintf(bmeWhyBuf, sizeof bmeWhyBuf, "no measurement (ctrl_meas=0x%02X status=0x%02X, want 0x27)", cm, st);
+    bmeWhy = bmeWhyBuf;
+    return false;
+  }
 
   int32_t v1 = ((((adcT >> 3) - ((int32_t)bme.T1 << 1))) * (int32_t)bme.T2) >> 11;
   int32_t v2 = (((((adcT >> 4) - (int32_t)bme.T1) * ((adcT >> 4) - (int32_t)bme.T1)) >> 12) * (int32_t)bme.T3) >> 14;
@@ -128,7 +150,7 @@ static bool bmeRead(float& temp, float& hum, float& pres) {
   p2 += (int64_t)bme.P4 << 35;
   p1 = ((p1 * p1 * (int64_t)bme.P3) >> 8) + ((p1 * (int64_t)bme.P2) << 12);
   p1 = ((((int64_t)1) << 47) + p1) * (int64_t)bme.P1 >> 33;
-  if (p1 == 0) return false;
+  if (p1 == 0) { bmeWhy = "pressure calibration P1 is 0"; return false; }
   int64_t p = 1048576 - adcP;
   p = (((p << 31) - p2) * 3125) / p1;
   p1 = ((int64_t)bme.P9 * (p >> 13) * (p >> 13)) >> 25;
@@ -282,6 +304,7 @@ static Mq4Reading mq4Read() {
 
 // ── Main loop ────────────────────────────────────────────────────────
 static uint32_t lastSample = 0, lastProbe = 0;
+static int bmeFails = 0, scdZeroes = 0;
 static char cmd[32];
 static int cmdLen = 0;
 
@@ -348,10 +371,26 @@ void loop() {
   int n = snprintf(line, sizeof line, "{\"ms\":%lu", (unsigned long)now);
   float a, b, c, d;
   int calib;
-  if (bmeRead(a, b, c))
+  if (bmeRead(a, b, c)) {
+    bmeFails = 0;
     n += snprintf(line + n, sizeof line - n, ",\"bme280\":{\"temp\":%.2f,\"hum\":%.2f,\"pres\":%.2f}", a, b, c);
-  if (scdRead(a, b, c))
-    n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"co2_ppm\":%.0f,\"temp\":%.2f,\"hum\":%.2f}", a, b, c);
+  } else if (bme.addr) {
+    ++bmeFails;
+    if (bmeFails == 3 || bmeFails % 30 == 0) {         // explain, without flooding the output
+      char m[140];
+      snprintf(m, sizeof m, "bme280: no reading (%s)", bmeWhy);
+      diag(m);
+    }
+    if (bmeFails % 10 == 0) { diag("bme280: re-initialising"); bmeInit(); }
+  }
+  if (scdRead(a, b, c)) {
+    // CO2 = 0 is impossible in air (the SCD40's range starts at 400 ppm): leave it out rather than publish it
+    if (a > 0) n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"co2_ppm\":%.0f,\"temp\":%.2f,\"hum\":%.2f}", a, b, c);
+    else {
+      n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"temp\":%.2f,\"hum\":%.2f}", b, c);
+      if (scdZeroes++ % 12 == 0) diag("scd40: CO2 reads 0, left out (normal for the first readings after start)");
+    }
+  }
   if (bnoRead(a, b, c, d, calib))
     n += snprintf(line + n, sizeof line - n,
                   ",\"bno055\":{\"heading_deg\":%.2f,\"roll_deg\":%.2f,\"pitch_deg\":%.2f,\"lin_acc_ms2\":%.2f,\"imu_calib\":%d}",
