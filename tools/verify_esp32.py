@@ -24,6 +24,7 @@ import argparse
 import json
 import math
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -161,6 +162,12 @@ def auto_checks(samples: List[Sample], notes: List[str]) -> List[Check]:
         elif n < need:
             c.append(Check(s, "present", "WARN", f"only {n} readings in {lines} lines", "loose wire or bus errors"))
 
+    resets = [int(m.group(1)) for n in notes for m in [re.search(r"bme280: chip reset (\d+) time", n)] if m]
+    if resets:
+        n = max(resets)
+        c.append(Check("bme280", "power", "WARN" if n < 5 else "FAIL", f"the chip reset {n} time(s) since the board started",
+                       "a BME280 only resets when its supply drops: check its VIN/GND joints (wiggle test), the "
+                       "board's 3V3 pin under load, and the USB cable; readings continue, but some are lost"))
     t, h, p = med(samples, "bme280", "temp"), med(samples, "bme280", "hum"), med(samples, "bme280", "pres")
     if t is not None:
         c.append(Check("bme280", "temperature", band(t, (5, 45)), f"{t:.1f} °C"))

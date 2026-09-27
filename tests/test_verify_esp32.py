@@ -121,3 +121,12 @@ def test_against_the_simulated_board():
                        env=env, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Magnetic field" in r.stdout and "self-test" in r.stdout and '"fail": 0' in r.stdout
+
+
+def test_bme280_resets_reported_by_the_board_are_a_power_finding():
+    notes = NOTES + ["bme280: chip reset 1 time(s) since start (settings lost: a dip in its 3.3 V? check its VCC/GND "
+                     "wiring); settings sent again", "bme280: chip reset 10 time(s) since start (settings lost: …)"]
+    c = by(v.auto_checks(samples(), notes), "bme280", "power")
+    assert c.status == "FAIL" and "10 time(s)" in c.detail
+    assert by(v.auto_checks(samples(), NOTES + ["bme280: chip reset 2 time(s) since start"]), "bme280", "power").status == "WARN"
+    assert not [x for x in v.auto_checks(samples(), NOTES) if x.name == "power"]
