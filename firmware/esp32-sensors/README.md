@@ -72,9 +72,25 @@ if you want to go back to it.
 
 ## Connect it to the Pi
 
-Unplug the board's adapter, and plug the board into a USB port on the Pi instead. The Pi
-powers it (well within the Pi 5's USB budget with the 27 W supply) and reads it over the
-same cable. Then, on the PC:
+Keep the board on its 12 V adapter (12 V → buck → 5 V rail → ESP32 VIN and MQ-4) and use
+the USB cable to the Pi for data. Only plug both in if the ESP32 board has a diode between
+its USB 5 V and its VIN pin (check below); otherwise the buck's 5 V and the Pi's USB 5 V are
+tied together.
+
+**Do not run the board from the Pi's USB alone.** USB 5 V reaches VIN through that diode
+at about 4.5 V once the MQ-4 heater (~150 mA) is on. The ESP32 board's 3.3 V regulator
+(AMS1117 class, ~1.1 V dropout) then has almost no headroom, and every SCD40 measurement
+(up to ~200 mA on 3.3 V every 5 s) dips the 3.3 V rail. On the first board this reset the
+BME280 dozens of times a minute (`bme280: chip reset N time(s)`) and the SCD40 reported
+CO₂ 0. The MQ-4 heater also wants 5.0 V ± 0.1 V, so calibrate it on the adapter only.
+
+Checking for the diode, with everything unplugged: multimeter in diode mode, the USB cable
+plugged into the ESP32 board only. Probe between the free USB-A plug's VBUS pin (pin 1, an
+outer pin) and the board's VIN/5V pin, both ways round. A diode reads about 0.2–0.4 V one
+way and open (OL) the other way. A beep or 0.00 V both ways means no diode: then power the
+board from USB alone only for flashing, not for measuring.
+
+Then, on the PC:
 
 ```powershell
 ssh -t pratham@<pi-ip> "cd imm-os-edge && sudo .venv/bin/python tools/bringup.py esp32"
