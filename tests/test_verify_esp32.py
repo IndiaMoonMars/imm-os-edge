@@ -61,6 +61,8 @@ def test_humidity_sensors_disagree():
 
 def test_missing_sensor_and_self_test_failure():
     checks = v.auto_checks(samples(mq4=None), [NOTES[0], "bno055 self-test: accel=pass mag=FAIL gyro=pass mcu=pass"])
+    bme = by(v.auto_checks(samples(bme280=None), NOTES + ["bme280: no reading (data read failed (I2C))"]), "bme280", "present")
+    assert bme.status == "FAIL" and bme.detail == "no readings; board says: bme280: no reading (data read failed (I2C))"
     assert by(checks, "mq4", "present").status == "FAIL" and "GPIO32" in by(checks, "mq4", "present").hint
     st = by(checks, "bno055", "self-test")
     assert st.status == "FAIL" and st.detail == "failed: mag"

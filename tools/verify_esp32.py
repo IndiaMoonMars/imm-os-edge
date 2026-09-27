@@ -156,7 +156,8 @@ def auto_checks(samples: List[Sample], notes: List[str]) -> List[Check]:
                            "AO → divider → GPIO32 and GND",
                     "scd40": "not on the I2C bus at 0x62, or no measurement yet (first one after 5 s): check 3.3 V/SDA/SCL"
                     }.get(s, "not found on the I2C bus: check its 3.3 V, GND, SDA (GPIO21) and SCL (GPIO22)")
-            c.append(Check(s, "present", "FAIL", "no readings", hint))
+            why = [n for n in notes if n.startswith(f"{s}:")]          # the board's own reason, e.g. "bme280: no reading (…)"
+            c.append(Check(s, "present", "FAIL", "no readings" + (f"; board says: {why[-1]}" if why else ""), hint))
         elif n < need:
             c.append(Check(s, "present", "WARN", f"only {n} readings in {lines} lines", "loose wire or bus errors"))
 
@@ -466,7 +467,7 @@ def run(port, args) -> int:
         overview = [("bme280", "temp"), ("scd40", "co2_ppm"), ("o2", "o2_pct"), ("mq4", "vout_mv"), ("bno055", "heading_deg")]
         print("  " + live_line(reader.samples, overview), flush=True)
     samples = reader.since(t0)
-    board_notes = [n for n in reader.notes if n.startswith(("sensors:", "bno055 self-test"))]
+    board_notes = list(dict.fromkeys(reader.notes))                  # every distinct diagnostic line, in order
     for n in board_notes:
         print("  board: " + n)
     print("\n── Every value (latest, and min/max over the window) ──" + table(samples))
