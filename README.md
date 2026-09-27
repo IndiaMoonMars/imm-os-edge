@@ -43,6 +43,11 @@ port and is read by `esp32_bridge.py`: [firmware/esp32-sensors](firmware/esp32-s
 No hardware at hand? `tools/hwsim` stands in for the sensor libraries, so the unmodified drivers
 run on a laptop: `PYTHONPATH=tools/hwsim python sensor_drivers/ecg_driver.py`.
 
+The MCC PC's address can change (DHCP, another Wi-Fi network): every node runs
+`imm-mcc-discovery.timer`, which checks each minute that `imm.local` still answers with the
+MCC's TLS certificate and, if not, scans the local network for it and repoints `imm.local`
+(`tools/find_mcc.py`). The Pi and the PC must be on the same network.
+
 When a sensor passes, add its driver with `setup-node.sh --sensors "…"` and switch it off
 in the MCC simulator (`SIM_DISABLED_SENSORS`). Every node also runs `sysmon_driver.py`
 (node health: temperature, load, power supply, Pi 5 PMIC power and fan).

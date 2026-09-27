@@ -7,6 +7,7 @@
 #   ECLSS daemons      IMM_ECLSS_DAEMONS="water_monitor eclss_pid"
 #   EVA daemons        IMM_EVA_DAEMONS="gps_driver uwb_driver position_fusion"
 #   lighting listener  always (logs only until LIGHT_ZONES is set)
+#   MCC discovery      always: a timer re-finds the MCC if its IP address changes
 # The lists are read from /etc/imm-os/edge.env; scripts/setup-node.sh writes them.
 #
 # Overridable: IMM_HOME (default: this checkout), IMM_USER (default: owner of IMM_HOME),
@@ -43,7 +44,8 @@ install_unit() {
 }
 
 echo "Installing units (code $IMM_HOME, user $IMM_USER, python $IMM_PYTHON)"
-for unit in imm-sensor-pipeline@.service imm-lighting-controller.service imm-eclss@.service imm-eva@.service; do
+for unit in imm-sensor-pipeline@.service imm-lighting-controller.service imm-eclss@.service imm-eva@.service \
+            imm-mcc-discovery.service imm-mcc-discovery.timer; do
     install_unit "$unit"
 done
 install -d -o "$IMM_USER" -g "$IMM_USER" /var/lib/imm-os /var/lib/imm-os/blackbox /var/lib/imm-os/spool
@@ -73,9 +75,12 @@ for d in ${IMM_EVA_DAEMONS:-}; do
     systemctl enable --now "imm-eva@$d"
 done
 
+echo "Starting MCC discovery (every minute: re-finds the MCC if its IP address changes)"
+systemctl enable --now imm-mcc-discovery.timer
+
 echo "Starting ECLSS lighting controller (MQTT listener)"
 systemctl enable --now imm-lighting-controller.service
 
 echo "Deployment complete. Status:"
 sleep 2
-systemctl --no-pager --lines=0 status 'imm-sensor-pipeline@*' 'imm-eclss@*' 'imm-eva@*' imm-lighting-controller.service || true
+systemctl --no-pager --lines=0 status 'imm-sensor-pipeline@*' 'imm-eclss@*' 'imm-eva@*' imm-lighting-controller.service imm-mcc-discovery.timer || true
