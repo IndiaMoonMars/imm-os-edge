@@ -66,7 +66,8 @@ def main():
             
             # Construct protobuf record
             record = current_chunk.records.add()
-            record.timestamp = data_dict.get("timestamp", int(time.time()))
+            # whole seconds here (int64); the full-precision timestamp stays in payload_json
+            record.timestamp = int(float(data_dict.get("timestamp", time.time())))
             record.sensor_type = data_dict.get("sensor", "unknown")
             record.payload_json = json.dumps(data_dict)
             record.signature = sig

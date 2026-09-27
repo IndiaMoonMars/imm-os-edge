@@ -23,8 +23,10 @@ LINE = ('{"ms":7065,"bme280":{"temp":25.08,"hum":55.0,"pres":1006.53},'
 def test_parse_line():
     assert esp32_bridge.parse_line("") is None
     assert esp32_bridge.parse_line("# sensors: bme280=0x76\n") == ("info", "sensors: bme280=0x76")
-    assert esp32_bridge.parse_line("\x00\xffgarbage")[0] == "bad"
-    assert esp32_bridge.parse_line("[1, 2]")[0] == "bad"
+    assert esp32_bridge.parse_line('{"ms":12,"bme2')[0] == "bad"                      # a data line cut off
+    assert esp32_bridge.parse_line("[1, 2]")[0] == "boot"
+    assert esp32_bridge.parse_line("rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)") == \
+        ("boot", "rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)")
     kind, data = esp32_bridge.parse_line(LINE)
     assert kind == "data" and data["ms"] == 7065
 
@@ -78,7 +80,7 @@ class FakeSerial:
 def test_read_loop_publishes_and_explains_mq4_state(capsys):
     published = []
     ser = FakeSerial(["# IMM-OS ESP32 sensor board started", '{"ms":1,"mq4":{"vout_mv":930,"warming":1,"calibrated":0}}',
-                      '{"ms":2,"mq4":{"vout_mv":930,"warming":1,"calibrated":0}}', "noise"])
+                      '{"ms":2,"mq4":{"vout_mv":930,"warming":1,"calibrated":0}}', '{"ms":3,"mq'])
     with pytest.raises(KeyboardInterrupt):
         esp32_bridge.read_loop(ser, lambda p, t: published.append((t, p)), now=lambda: 5.0)
     assert [t for t, _ in published] == ["habitat/sensors/mq4/zone1"] * 2
@@ -104,3 +106,45 @@ def test_bringup_treats_esp32_as_usb_board(monkeypatch):
     assert not bringup.connected(esp, set(), True)
     monkeypatch.setattr(bringup, "esp32_port", lambda: "/dev/ttyUSB0")
     assert bringup.connected(esp, set(), False)
+
+
+def test_rom_banner_is_start_up_info_said_once(capsys):
+    banner = "rst:ets Jul 29 2019 12:21:46"
+    ser = FakeSerial([banner] * 15 + ["entry 0x400805e4", '{"ms":1,"o2":{"o2_pct":20.9}}', '{"ms":2,"o2'])
+    with pytest.raises(KeyboardInterrupt):
+        esp32_bridge.read_loop(ser, lambda p, t: None)
+    err = [json.loads(x) for x in capsys.readouterr().err.splitlines()]
+    assert err == [{"info": f"esp32 start-up: {banner}"}, {"info": "esp32 start-up: entry 0x400805e4"},
+                   {"error": "Invalid ESP32 line: '{\"ms\":2,\"o2'"}]
+
+
+def test_opening_the_port_does_not_reset_the_board(monkeypatch):
+    """ESP32 DevKit auto-reset: EN is pulled low (reset) while RTS is on and DTR is off. Linux turns
+    both on when the port opens; whatever order the lines then change in must avoid that state."""
+    states = []
+
+    class LineRecorder:
+        def __init__(self):
+            self._dtr = self._rts = True          # pyserial's defaults
+            self.is_open = False
+
+        def _set(self, dtr, rts):
+            self._dtr, self._rts = dtr, rts
+            if self.is_open:
+                states.append((dtr, rts))
+
+        def open(self):                           # the kernel raises both, then pyserial applies DTR, then RTS
+            want = (self._dtr, self._rts)
+            self.is_open = True
+            self._set(True, True)
+            self._set(want[0], True)
+            self._set(want[0], want[1])
+
+        dtr = property(lambda self: self._dtr, lambda self, v: self._set(v, self._rts))
+        rts = property(lambda self: self._rts, lambda self, v: self._set(self._dtr, v))
+
+    import types
+    monkeypatch.setitem(sys.modules, "serial", types.SimpleNamespace(Serial=LineRecorder))
+    esp32_bridge.open_port("/dev/ttyUSB0")
+    assert states[-1] == (False, False)
+    assert (False, True) not in states, states           # DTR off + RTS on = EN low = reset

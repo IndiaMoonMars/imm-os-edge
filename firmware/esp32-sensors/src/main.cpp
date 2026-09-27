@@ -81,6 +81,8 @@ struct Bme280 {
 } bme;
 static const char* bmeWhy = "";         // why the last bmeRead() failed (diagnostics)
 static char bmeWhyBuf[96];
+static int bmeResets = 0;               // times the chip had lost its settings (a power-on reset) since start
+static bool bmeSeenOk = false;          // settings seen in place at least once (a later loss is a reset)
 
 // Write a register and read it back: the BME280 ignores writes while it is still starting up
 static bool writeRegVerified(uint8_t addr, uint8_t reg, uint8_t value, uint8_t mask) {
@@ -117,7 +119,7 @@ static bool bmeInit() {
     bme.H6 = (int8_t)e[6];
     bool ok = writeRegVerified(a, 0xF2, 0x01, 0x07);            // humidity x1 (before ctrl_meas)
     ok = writeRegVerified(a, 0xF5, 0xA0, 0xFC) && ok;           // 1 s standby, filter off
-    ok = writeRegVerified(a, 0xF4, 0x27, 0xFF) && ok;           // temp x1, pressure x1, normal mode
+    ok = writeRegVerified(a, 0xF4, 0x24, 0xFF) && ok;           // temp x1, pressure x1, sleep (bmeRead forces each one)
     if (!ok) diag("bme280: settings did not stick (ctrl registers read back differently)");
     bme.addr = a;
     return true;
@@ -125,18 +127,34 @@ static bool bmeInit() {
   return false;
 }
 
+// Forced mode: every reading sends the settings and starts one measurement. A BME280 whose
+// supply dips resets to sleep with its settings cleared; in normal mode it would then never
+// measure again, in forced mode the next reading simply works. Such resets are counted.
 static bool bmeRead(float& temp, float& hum, float& pres) {
-  uint8_t d[8];
+  uint8_t d[8], cm;
   if (!bme.addr) { bmeWhy = "not initialised"; return false; }
+  if (!readRegs(bme.addr, 0xF4, &cm, 1)) { bmeWhy = "settings read failed (I2C)"; return false; }
+  if (bmeSeenOk && (cm & 0xFC) != 0x24) {                       // oversampling bits gone: the chip was reset
+    ++bmeResets;
+    if (bmeResets == 1 || bmeResets % 10 == 0) {
+      char m[150];
+      snprintf(m, sizeof m, "bme280: chip reset %d time(s) since start (settings lost: a dip in its 3.3 V? "
+                            "check its VCC/GND wiring); settings sent again", bmeResets);
+      diag(m);
+    }
+  }
+  if (!writeReg(bme.addr, 0xF2, 0x01) || !writeReg(bme.addr, 0xF4, 0x25)) { bmeWhy = "settings write failed (I2C)"; return false; }
+  delay(10);                                                    // one x1/x1/x1 measurement: 9.3 ms max
+  for (int i = 0; i < 20; i++) { uint8_t st; if (readRegs(bme.addr, 0xF3, &st, 1) && !(st & 0x08)) break; delay(2); }
   if (!readRegs(bme.addr, 0xF7, d, 8)) { bmeWhy = "data read failed (I2C)"; return false; }
   const int32_t adcP = (int32_t)d[0] << 12 | d[1] << 4 | d[2] >> 4;
   const int32_t adcT = (int32_t)d[3] << 12 | d[4] << 4 | d[5] >> 4;
   const int32_t adcH = (int32_t)d[6] << 8 | d[7];
   if (adcT == 0x80000) {                                        // measurement skipped / not started
-    uint8_t cm = 0, st = 0;
+    uint8_t st = 0;
     readRegs(bme.addr, 0xF4, &cm, 1);
     readRegs(bme.addr, 0xF3, &st, 1);
-    snprintf(bmeWhyBuf, sizeof bmeWhyBuf, "no measurement (ctrl_meas=0x%02X status=0x%02X, want 0x27)", cm, st);
+    snprintf(bmeWhyBuf, sizeof bmeWhyBuf, "no measurement (ctrl_meas=0x%02X status=0x%02X, want 0x24)", cm, st);
     bmeWhy = bmeWhyBuf;
     return false;
   }
@@ -167,6 +185,7 @@ static bool bmeRead(float& temp, float& hum, float& pres) {
   h = h - (((((h >> 15) * (h >> 15)) >> 7) * (int32_t)bme.H1) >> 4);
   h = h < 0 ? 0 : (h > 419430400 ? 419430400 : h);
   hum = (h >> 12) / 1024.0f;
+  bmeSeenOk = true;
   return true;
 }
 
@@ -335,6 +354,10 @@ static void status() {
            bme.addr ? (bme.addr == 0x76 ? "0x76" : "0x77") : "none", scdFound ? "0x62" : "none",
            bnoAddr ? (bnoAddr == 0x28 ? "0x28" : "0x29") : "none", o2Addr ? "found" : "none", mq4R0, (double)MQ4_DIVIDER);
   diag(b);
+  if (bmeResets) {
+    snprintf(b, sizeof b, "bme280: chip reset %d time(s) since start", bmeResets);
+    diag(b);
+  }
   if (bnoAddr) {
     snprintf(b, sizeof b, "bno055 self-test: accel=%s mag=%s gyro=%s mcu=%s",
              bnoSelfTest & 1 ? "pass" : "FAIL", bnoSelfTest & 2 ? "pass" : "FAIL",
@@ -371,7 +394,7 @@ void setup() {
   Wire.setClock(100000);                // BNO055 stretches the clock; 100 kHz keeps every device happy
   Wire.setTimeOut(50);
   prefs.begin("imm-mq4", false);
-  mq4R0 = prefs.getFloat("r0", 0);
+  mq4R0 = prefs.isKey("r0") ? prefs.getFloat("r0", 0) : 0;   // isKey: no "NOT_FOUND" error log before CAL_MQ4
   delay(800);                           // BNO055 boot time after power-up
   diag("IMM-OS ESP32 sensor board started");
   findSensors();

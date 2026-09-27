@@ -13,6 +13,7 @@
 //     remove DEV | add DEV        take a device off / put it back on the bus (bme scd bno o2)
 //     bmp                         the BME280 answers as a BMP280 (chip ID 0x58)
 //     bmeignore N                 the BME280 ignores its next N writes to ctrl_meas
+//     bmereset                    the BME280 power-on resets (a supply dip): settings and data cleared
 //     reset                       reboot the ESP32 (flash contents kept)
 //     o2user                      print what CAL_O2 wrote to the SEN0322
 // Everything the firmware prints goes to stdout.
@@ -40,9 +41,14 @@ struct RegDevice : I2CDevice {
   std::map<uint8_t, int> writes;                               // last value written per register
   void write(const std::vector<uint8_t>& b) override {
     ptr = b[0];
-    for (size_t i = 1; i < b.size(); i++) { writes[ptr] = b[i]; if (accept(ptr, b[i])) reg[ptr] = b[i]; ptr++; }
+    for (size_t i = 1; i < b.size(); i++) {
+      writes[ptr] = b[i];
+      if (accept(ptr, b[i])) { reg[ptr] = b[i]; stored(ptr, b[i]); }
+      ptr++;
+    }
   }
   virtual bool accept(uint8_t, uint8_t) { return true; }   // false: the chip ignores this write
+  virtual void stored(uint8_t, uint8_t) {}                  // after a write took effect
   std::vector<uint8_t> read(size_t n) override {
     std::vector<uint8_t> out;
     for (size_t i = 0; i < n; i++) out.push_back(reg[(uint8_t)(ptr + i)]);
@@ -59,6 +65,17 @@ struct Bme280Dev : RegDevice {
     if (r == 0xF4 && ignoreCtrl > 0) { ignoreCtrl--; return false; }
     return true;
   }
+  int rawT = 0x80000, rawP = 0x80000, rawH = 0x8000;           // what the next measurement reads
+  // ctrl_meas mode bits: 01/10 forced (one measurement, back to sleep), 11 normal (continuous)
+  void stored(uint8_t r, uint8_t v) override {
+    if (r != 0xF4 || !(v & 3)) return;
+    setData(rawT, rawP, rawH);
+    if ((v & 3) != 3) reg[0xF4] = v & 0xFC;
+  }
+  void powerOnReset() {
+    reg[0xF2] = reg[0xF4] = reg[0xF5] = 0;
+    setData(0x80000, 0x80000, 0x8000);
+  }
   Bme280Dev() {
     reg[0xD0] = 0x60;
     // BME280 datasheet example calibration (T, P) and typical humidity trimming values
@@ -70,9 +87,13 @@ struct Bme280Dev : RegDevice {
     const int h4 = 313, h5 = 50;
     reg[0xE4] = (h4 >> 4) & 0xFF; reg[0xE5] = (h4 & 0x0F) | ((h5 & 0x0F) << 4); reg[0xE6] = (h5 >> 4) & 0xFF;
     reg[0xE7] = 30;                                            // H6
-    setRaw(0x80000, 0x80000, 0x8000);                          // "no measurement" until set
+    setData(0x80000, 0x80000, 0x8000);                         // "no measurement" until one is made
   }
   void setRaw(int t, int p, int h) {
+    rawT = t; rawP = p; rawH = h;
+    if ((reg[0xF4] & 3) == 3) setData(t, p, h);                  // normal mode: measuring all the time
+  }
+  void setData(int t, int p, int h) {
     reg[0xF7] = p >> 12; reg[0xF8] = (p >> 4) & 0xFF; reg[0xF9] = (p & 0x0F) << 4;
     reg[0xFA] = t >> 12; reg[0xFB] = (t >> 4) & 0xFF; reg[0xFC] = (t & 0x0F) << 4;
     reg[0xFD] = h >> 8; reg[0xFE] = h & 0xFF;
@@ -163,9 +184,10 @@ int main(int, char** argv) {
     } else if (op == "remove" || op == "add") { std::string d; ss >> d; attach(d, op == "add"); }
     else if (op == "bmp") bmeDev.reg[0xD0] = 0x58;
     else if (op == "bmeignore") ss >> bmeDev.ignoreCtrl;
+    else if (op == "bmereset") bmeDev.powerOnReset();
     else if (op == "o2user") std::cout << "O2USER " << o2Dev.writes[0x08] << "\n";
     else if (op == "reset") {
-      bme.addr = 0; bmeFails = 0; scdZeroes = 0; scdFound = false; bnoAddr = 0; o2Addr = 0; mq4R0 = 0; mq4CalLeft = 0; mq4CalSum = 0;
+      bme.addr = 0; bmeFails = 0; bmeResets = 0; bmeSeenOk = false; scdZeroes = 0; scdFound = false; bnoAddr = 0; o2Addr = 0; mq4R0 = 0; mq4CalLeft = 0; mq4CalSum = 0;
       lastSample = lastProbe = 0; cmdLen = 0; sim::now_ms = 0; scdDev.running = scdDev.running;   // the SCD40 keeps measuring
       setup();
     }

@@ -56,12 +56,17 @@ def dew_point(temp_c: float, rh_pct: float):
 
 
 def parse_line(line: str):
-    """('data', dict) | ('info', text) | ('bad', text) | None for a blank line."""
+    """('data', dict) | ('info', text) | ('boot', text) | ('bad', text) | None for a blank line.
+
+    'boot': not ours, e.g. the ESP32 ROM's reset banner ("rst:0x1 (POWERON_RESET)…") or an
+    ESP-IDF log line; 'bad': a data line that doesn't parse (cut off, garbled)."""
     line = line.strip()
     if not line:
         return None
     if line.startswith("#"):
         return "info", line.lstrip("# ")
+    if not line.startswith("{"):
+        return "boot", line
     try:
         data = json.loads(line)
     except ValueError:
@@ -92,16 +97,23 @@ def to_payloads(data: dict, now: float):
 
 def open_port(port: str):
     import serial
+    # Opening the port must not reset the board (that restarts the MQ-4 warm-up and loses the
+    # BNO055 calibration). The DevKit's auto-reset circuit pulls EN low only while RTS is on and
+    # DTR is off. Linux turns both on when the port opens, which is harmless; turning DTR off
+    # first (as setting both False before open() does) passes through that reset state, so RTS
+    # goes off first (IO0 low while EN stays high: nothing happens), then DTR.
     ser = serial.Serial()
     ser.port, ser.baudrate, ser.timeout = port, BAUD_RATE, 2.0
-    ser.dtr = ser.rts = False          # don't pulse EN/IO0: opening the port must not reset the board
     ser.open()
+    ser.rts = False
+    ser.dtr = False
     return ser
 
 
 def read_loop(ser, publish_fn, now=time.time):
     ser.reset_input_buffer()
     warned = set()
+    last_boot = None
     while True:
         try:
             parsed = parse_line(ser.readline().decode("utf-8", "replace"))
@@ -124,6 +136,10 @@ def read_loop(ser, publish_fn, now=time.time):
                 print(json.dumps({"info": msg}), file=sys.stderr, flush=True)
         elif kind == "info":
             print(json.dumps({"info": f"esp32: {value}"}), file=sys.stderr, flush=True)
+        elif kind == "boot":
+            if value != last_boot:                         # the ROM repeats its banner: say it once
+                print(json.dumps({"info": f"esp32 start-up: {value[:120]}"}), file=sys.stderr, flush=True)
+            last_boot = value
         else:
             print(json.dumps({"error": f"Invalid ESP32 line: {value[:120]!r}"}), file=sys.stderr, flush=True)
 

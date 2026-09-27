@@ -396,6 +396,8 @@ class Reader(threading.Thread):
                 self.samples.append((time.time(), parsed[1]))
             elif parsed and parsed[0] == "info":
                 self.notes.append(parsed[1])
+            elif parsed and parsed[0] == "boot":                  # the ESP32 restarted (ROM banner)
+                self.notes.append(f"start-up: {parsed[1][:100]}")
 
     def since(self, t0) -> List[Sample]:
         return [s for s in list(self.samples) if s[0] >= t0]

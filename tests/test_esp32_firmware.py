@@ -155,6 +155,27 @@ def test_bme280_that_never_measures_is_explained_and_reinitialised(sim, tmp_path
     assert all("bme280" not in d for d in data) and "bno055" in data[-1]          # the rest keeps reporting
 
 
+def test_bme280_keeps_reporting_through_chip_resets(sim, tmp_path):
+    """On the real board the BME280 kept losing its settings (ctrl_meas 0x00: a power-on reset
+    from a supply dip) and, in normal mode, never measured again. Forced mode sends them with
+    every reading, so a reset costs nothing, and the resets are counted as evidence."""
+    script = BASE + "run 3\nbmereset\nrun 2\nbmereset\nrun 2\nsend STATUS\nrun 1\n"
+    data, notes = sim(script, tmp_path)
+    assert all(d["bme280"]["temp"] == 25.08 for d in data)                       # every second, no gap
+    assert sum("chip reset" in n and "since start (settings lost" in n for n in notes) == 1   # said once
+    assert "# bme280: chip reset 2 time(s) since start" in notes                 # STATUS keeps the count
+    assert not any("no reading" in n for n in notes)
+
+
+def test_bme280_in_normal_mode_would_have_stopped(sim, tmp_path):
+    """The simulator's reset really clears the chip: a measurement is needed to get data back."""
+    data, _ = sim(BASE + "run 2\n", tmp_path)
+    assert data[-1]["bme280"]["temp"] == 25.08
+    data, notes = sim(BASE + "run 2\nbmeignore 1000\nbmereset\nrun 3\n", tmp_path)   # reset, then writes ignored
+    assert "bme280" not in data[-1]
+    assert any("no measurement (ctrl_meas=0x00" in n for n in notes)
+
+
 def test_scd40_co2_zero_is_left_out(sim, tmp_path):
     data, notes = sim(BASE.replace("scd 612 26000 26214", "scd 0 26000 26214") + "run 12\n", tmp_path)
     scd = [d["scd40"] for d in data if "scd40" in d]

@@ -68,8 +68,13 @@ def replay(since_ts: int = 0):
                         skipped += 1
                         continue
 
-                    # Use sensor:timestamp as dedup key
-                    key = f"{record.sensor_type}:{record.timestamp}".encode()
+                    # Use sensor:timestamp as dedup key, with the payload's full-precision timestamp
+                    # (record.timestamp is whole seconds; the ECG sends 100 readings a second)
+                    try:
+                        ts = json.loads(record.payload_json).get("timestamp", record.timestamp)
+                    except ValueError:
+                        ts = record.timestamp
+                    key = f"{record.sensor_type}:{ts}".encode()
 
                     producer.produce(
                         RAW_TOPIC,
