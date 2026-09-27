@@ -6,11 +6,17 @@ The ESP32 (firmware/esp32-sensors) sends one line per second, e.g.
     {"ms":1000,"bme280":{"temp":24.5,"hum":41.2,"pres":1008.4},"o2":{"o2_pct":20.9},...}
 and each section is published on its own topic in the same shape as the Pi-wired drivers:
 
-    bme280  habitat/sensors/bme280/<zone>   temp, hum, pres
-    scd40   habitat/sensors/scd40/<zone>    co2_ppm, temp, hum
+    bme280  habitat/sensors/bme280/<zone>   temp, hum, pres, dew_point_c
+    scd40   habitat/sensors/scd40/<zone>    co2_ppm, temp, hum, dew_point_c
     o2      habitat/sensors/o2/<zone>       o2_pct            (DFRobot SEN0322)
-    bno055  habitat/sensors/bno055/<zone>   heading_deg, roll_deg, pitch_deg, lin_acc_ms2, imu_calib
-    mq4     habitat/sensors/mq4/<zone>      vout_mv, rs_r0, ch4_ppm (the last two once calibrated/warm)
+    bno055  habitat/sensors/bno055/<zone>   heading_deg, roll_deg, pitch_deg, lin_acc_ms2, imu_calib,
+                                            grav_ms2, mag_ut, gyro_dps, temp, calib_gyro/acc/mag
+    mq4     habitat/sensors/mq4/<zone>      vout_mv, rs_rl, rs_r0, ch4_ppm, warming, calibrated
+                                            (rs_r0 once calibrated, ch4_ppm once also warm)
+
+dew_point_c is calculated here from temp and hum (Magnus formula). The same air has the same
+dew point wherever it is measured, so the BME280's and SCD40's should agree even when their
+temperatures differ (the SCD40 warms itself): a check that both humidity sensors are right.
 
 Lines starting with '#' are the board's diagnostics (stderr as {"info": ...}).
 
@@ -19,6 +25,7 @@ Port: ESP32_PORT, else the first CP210x/CH340 USB-serial device. Modes: stdout |
 """
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -32,10 +39,20 @@ FIELDS = {
     "bme280": ("temp", "hum", "pres"),
     "scd40": ("co2_ppm", "temp", "hum"),
     "o2": ("o2_pct",),
-    "bno055": ("heading_deg", "roll_deg", "pitch_deg", "lin_acc_ms2", "imu_calib"),
-    "mq4": ("vout_mv", "rs_r0", "ch4_ppm"),
+    "bno055": ("heading_deg", "roll_deg", "pitch_deg", "lin_acc_ms2", "imu_calib",
+               "grav_ms2", "mag_ut", "gyro_dps", "temp", "calib_gyro", "calib_acc", "calib_mag"),
+    "mq4": ("vout_mv", "rs_rl", "rs_r0", "ch4_ppm", "warming", "calibrated"),
 }
-INT_FIELDS = {"imu_calib"}
+INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated"}
+DEW_POINT_SENSORS = ("bme280", "scd40")
+
+
+def dew_point(temp_c: float, rh_pct: float):
+    """Magnus formula (Sonntag 1990 constants), ±0.35 °C for -45…60 °C; None for RH 0."""
+    if rh_pct <= 0:
+        return None
+    g = math.log(min(rh_pct, 100.0) / 100.0) + 17.62 * temp_c / (243.12 + temp_c)
+    return 243.12 * g / (17.62 - g)
 
 
 def parse_line(line: str):
@@ -64,6 +81,10 @@ def to_payloads(data: dict, now: float):
             v = section.get(f)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 payload[f] = int(v) if f in INT_FIELDS else float(v)
+        if sensor in DEW_POINT_SENSORS and "temp" in payload and "hum" in payload:
+            dp = dew_point(payload["temp"], payload["hum"])
+            if dp is not None:
+                payload["dew_point_c"] = round(dp, 2)
         if len(payload) > 2:
             out.append((f"habitat/sensors/{sensor}/zone1", payload))
     return out

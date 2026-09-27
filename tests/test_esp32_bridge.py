@@ -14,8 +14,10 @@ import hw  # noqa: E402
 
 LINE = ('{"ms":7065,"bme280":{"temp":25.08,"hum":55.0,"pres":1006.53},'
         '"scd40":{"co2_ppm":612,"temp":24.43,"hum":40.0},'
-        '"bno055":{"heading_deg":90.0,"roll_deg":-5.0,"pitch_deg":2.0,"lin_acc_ms2":0.5,"imu_calib":3},'
-        '"o2":{"o2_pct":20.87},"mq4":{"vout_mv":930,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1}}')
+        '"bno055":{"heading_deg":90.0,"roll_deg":-5.0,"pitch_deg":2.0,"lin_acc_ms2":0.5,"imu_calib":3,'
+        '"grav_ms2":9.8,"mag_ut":40.7,"gyro_dps":2.29,"temp":27,"calib_gyro":3,"calib_acc":2,"calib_mag":1},'
+        '"o2":{"o2_pct":20.87},'
+        '"mq4":{"vout_mv":930,"rs_rl":4.376,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1}}')
 
 
 def test_parse_line():
@@ -32,10 +34,23 @@ def test_one_line_becomes_one_payload_per_sensor_in_the_pi_drivers_shapes():
     assert set(out) == {"bme280", "scd40", "bno055", "o2", "mq4"}
     topic, bme = out["bme280"]
     assert topic == "habitat/sensors/bme280/zone1"
+    dp = bme.pop("dew_point_c")
     assert bme == {"sensor": "bme280", "timestamp": 1790000000.123, "temp": 25.08, "hum": 55.0, "pres": 1006.53}
+    assert dp == pytest.approx(15.4, abs=0.1)                  # psychrometric table: 25 °C / 55 % → 15.3-15.4 °C
+    assert out["scd40"][1]["dew_point_c"] == pytest.approx(10.0, abs=0.1)    # table: 24 °C/40 % 9.6, 25 °C/40 % 10.5
     assert out["o2"][1]["o2_pct"] == 20.87
-    assert out["bno055"][1]["imu_calib"] == 3 and isinstance(out["bno055"][1]["imu_calib"], int)
-    assert out["mq4"][1] == {"sensor": "mq4", "timestamp": 1790000000.123, "vout_mv": 930.0, "rs_r0": 1.03, "ch4_ppm": 4.1}
+    bno = out["bno055"][1]
+    assert (bno["grav_ms2"], bno["mag_ut"], bno["gyro_dps"], bno["temp"]) == (9.8, 40.7, 2.29, 27.0)
+    assert all(isinstance(bno[k], int) for k in ("imu_calib", "calib_gyro", "calib_acc", "calib_mag"))
+    assert (bno["calib_gyro"], bno["calib_acc"], bno["calib_mag"]) == (3, 2, 1)
+    assert out["mq4"][1] == {"sensor": "mq4", "timestamp": 1790000000.123, "vout_mv": 930.0, "rs_rl": 4.376,
+                             "rs_r0": 1.03, "ch4_ppm": 4.1, "warming": 0, "calibrated": 1}
+
+
+def test_dew_point():
+    assert esp32_bridge.dew_point(20.0, 100.0) == pytest.approx(20.0, abs=0.01)   # saturated: dew point = temp
+    assert esp32_bridge.dew_point(30.0, 50.0) == pytest.approx(18.4, abs=0.15)
+    assert esp32_bridge.dew_point(20.0, 0.0) is None
 
 
 def test_partial_and_malformed_sections():
@@ -43,7 +58,7 @@ def test_partial_and_malformed_sections():
             "scd40": [], "future": {"x": 1}}
     out = {p["sensor"]: p for _, p in esp32_bridge.to_payloads(data, 1.0)}
     assert out["bme280"] == {"sensor": "bme280", "timestamp": 1.0, "pres": 1000.0}     # strings/bools dropped
-    assert out["mq4"] == {"sensor": "mq4", "timestamp": 1.0, "vout_mv": 900.0}          # warming: no ppm yet
+    assert out["mq4"] == {"sensor": "mq4", "timestamp": 1.0, "vout_mv": 900.0, "warming": 1}   # no ppm yet
     assert "scd40" not in out and "future" not in out
 
 

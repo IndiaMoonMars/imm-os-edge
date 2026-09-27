@@ -15,9 +15,11 @@
 // Output, one line per second (sections only for sensors that answered):
 //   {"ms":1000,"bme280":{"temp":24.51,"hum":41.20,"pres":1008.42},
 //    "scd40":{"co2_ppm":612,"temp":25.10,"hum":40.30},             (every 5 s, when new)
-//    "bno055":{"heading_deg":..,"roll_deg":..,"pitch_deg":..,"lin_acc_ms2":..,"imu_calib":3},
+//    "bno055":{"heading_deg":..,"roll_deg":..,"pitch_deg":..,"lin_acc_ms2":..,"imu_calib":3,
+//              "grav_ms2":9.80,"mag_ut":42.1,"gyro_dps":0.1,"temp":26,
+//              "calib_gyro":3,"calib_acc":3,"calib_mag":3},
 //    "o2":{"o2_pct":20.87},
-//    "mq4":{"vout_mv":1240,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1}}
+//    "mq4":{"vout_mv":1240,"rs_rl":3.03,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1}}
 // Lines starting with '#' are diagnostics.
 //
 // Commands (a line sent to the board):
@@ -222,7 +224,7 @@ static bool scdRead(float& co2, float& temp, float& hum) {
 }
 
 // ── BNO055 (Bosch: 9-axis fusion in NDOF mode) ───────────────────────
-static uint8_t bnoAddr = 0;
+static uint8_t bnoAddr = 0, bnoSelfTest = 0;                    // ST_RESULT: bit 0 acc, 1 mag, 2 gyro, 3 MCU (1 = passed)
 
 static bool bnoInit() {
   bnoAddr = 0;
@@ -235,6 +237,7 @@ static bool bnoInit() {
     writeReg(a, 0x3F, 0x20);                                    // system reset
     delay(700);
     for (int i = 0; i < 50 && !(readRegs(a, 0x00, &id, 1) && id == 0xA0); i++) delay(10);
+    if (!readRegs(a, 0x36, &bnoSelfTest, 1)) bnoSelfTest = 0;  // power-on self-test of the reset just done
     writeReg(a, 0x3E, 0x00);                                    // normal power
     delay(10);
     writeReg(a, 0x07, 0x00);
@@ -250,16 +253,34 @@ static bool bnoInit() {
 
 static int16_t le16(const uint8_t* b) { return (int16_t)(b[0] | b[1] << 8); }
 
-static bool bnoRead(float& heading, float& roll, float& pitch, float& linAcc, int& calib) {
-  uint8_t e[6], l[6], c;
-  if (!bnoAddr || !readRegs(bnoAddr, 0x1A, e, 6) || !readRegs(bnoAddr, 0x28, l, 6) || !readRegs(bnoAddr, 0x35, &c, 1))
-    return false;
-  heading = le16(&e[0]) / 16.0f;
-  roll = le16(&e[2]) / 16.0f;
-  pitch = le16(&e[4]) / 16.0f;
-  const float x = le16(&l[0]) / 100.0f, y = le16(&l[2]) / 100.0f, z = le16(&l[4]) / 100.0f;
-  linAcc = sqrtf(x * x + y * y + z * z);
-  calib = (c >> 6) & 0x03;                                      // system calibration 0-3
+struct BnoReading {
+  float heading, roll, pitch;   // degrees (fusion)
+  float linAcc;                 // m/s², acceleration without gravity (magnitude)
+  float grav;                   // m/s², gravity vector (magnitude): 9.8 when the accelerometer is right
+  float mag;                    // µT, magnetic field (magnitude): 25-65 µT is the Earth's field
+  float gyro;                   // °/s, rotation rate (magnitude)
+  int temp;                     // °C, chip temperature
+  int calSys, calGyro, calAcc, calMag;   // 0-3 each
+};
+
+static float norm3(const uint8_t* b, float lsb) {
+  const float x = le16(&b[0]) / lsb, y = le16(&b[2]) / lsb, z = le16(&b[4]) / lsb;
+  return sqrtf(x * x + y * y + z * z);
+}
+
+static bool bnoRead(BnoReading& r) {
+  uint8_t d[40];                                                // 0x0E MAG … 0x35 CALIB_STAT in one burst
+  if (!bnoAddr || !readRegs(bnoAddr, 0x0E, d, sizeof d)) return false;
+  r.mag = norm3(&d[0x0E - 0x0E], 16.0f);
+  r.gyro = norm3(&d[0x14 - 0x0E], 16.0f);
+  r.heading = le16(&d[0x1A - 0x0E]) / 16.0f;
+  r.roll = le16(&d[0x1C - 0x0E]) / 16.0f;
+  r.pitch = le16(&d[0x1E - 0x0E]) / 16.0f;
+  r.linAcc = norm3(&d[0x28 - 0x0E], 100.0f);
+  r.grav = norm3(&d[0x2E - 0x0E], 100.0f);
+  r.temp = (int8_t)d[0x34 - 0x0E];
+  const uint8_t c = d[0x35 - 0x0E];
+  r.calSys = c >> 6 & 3; r.calGyro = c >> 4 & 3; r.calAcc = c >> 2 & 3; r.calMag = c & 3;
   return true;
 }
 
@@ -309,11 +330,17 @@ static char cmd[32];
 static int cmdLen = 0;
 
 static void status() {
-  char b[160];
+  char b[200];
   snprintf(b, sizeof b, "sensors: bme280=%s scd40=%s bno055=%s o2=%s mq4_r0=%.3f divider=%.2f",
            bme.addr ? (bme.addr == 0x76 ? "0x76" : "0x77") : "none", scdFound ? "0x62" : "none",
            bnoAddr ? (bnoAddr == 0x28 ? "0x28" : "0x29") : "none", o2Addr ? "found" : "none", mq4R0, (double)MQ4_DIVIDER);
   diag(b);
+  if (bnoAddr) {
+    snprintf(b, sizeof b, "bno055 self-test: accel=%s mag=%s gyro=%s mcu=%s",
+             bnoSelfTest & 1 ? "pass" : "FAIL", bnoSelfTest & 2 ? "pass" : "FAIL",
+             bnoSelfTest & 4 ? "pass" : "FAIL", bnoSelfTest & 8 ? "pass" : "FAIL");
+    diag(b);
+  }
 }
 
 static void findSensors() {
@@ -367,10 +394,10 @@ void loop() {
   if (now - lastSample < PERIOD_MS) return;
   lastSample = now;
 
-  char line[512];
+  char line[768];
   int n = snprintf(line, sizeof line, "{\"ms\":%lu", (unsigned long)now);
-  float a, b, c, d;
-  int calib;
+  float a, b, c;
+  BnoReading bno;
   if (bmeRead(a, b, c)) {
     bmeFails = 0;
     n += snprintf(line + n, sizeof line - n, ",\"bme280\":{\"temp\":%.2f,\"hum\":%.2f,\"pres\":%.2f}", a, b, c);
@@ -391,10 +418,13 @@ void loop() {
       if (scdZeroes++ % 12 == 0) diag("scd40: CO2 reads 0, left out (normal for the first readings after start)");
     }
   }
-  if (bnoRead(a, b, c, d, calib))
+  if (bnoRead(bno))
     n += snprintf(line + n, sizeof line - n,
-                  ",\"bno055\":{\"heading_deg\":%.2f,\"roll_deg\":%.2f,\"pitch_deg\":%.2f,\"lin_acc_ms2\":%.2f,\"imu_calib\":%d}",
-                  a, b, c, d, calib);
+                  ",\"bno055\":{\"heading_deg\":%.2f,\"roll_deg\":%.2f,\"pitch_deg\":%.2f,\"lin_acc_ms2\":%.2f,\"imu_calib\":%d,"
+                  "\"grav_ms2\":%.2f,\"mag_ut\":%.1f,\"gyro_dps\":%.2f,\"temp\":%d,"
+                  "\"calib_gyro\":%d,\"calib_acc\":%d,\"calib_mag\":%d}",
+                  bno.heading, bno.roll, bno.pitch, bno.linAcc, bno.calSys, bno.grav, bno.mag, bno.gyro, bno.temp,
+                  bno.calGyro, bno.calAcc, bno.calMag);
   if (o2Read(a))
     n += snprintf(line + n, sizeof line - n, ",\"o2\":{\"o2_pct\":%.2f}", a);
 
@@ -411,7 +441,7 @@ void loop() {
         diag(m);
       }
     }
-    n += snprintf(line + n, sizeof line - n, ",\"mq4\":{\"vout_mv\":%.0f", mq.voutMv);
+    n += snprintf(line + n, sizeof line - n, ",\"mq4\":{\"vout_mv\":%.0f,\"rs_rl\":%.3f", mq.voutMv, mq.rsRl);
     if (mq4R0 > 0) {
       const float ratio = mq.rsRl / mq4R0;
       n += snprintf(line + n, sizeof line - n, ",\"rs_r0\":%.3f", ratio);

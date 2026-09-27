@@ -17,6 +17,7 @@ BASE = """mq4 620
 bme 519888 415148 30000
 scd 612 26000 26214
 bno 1440 -80 32 30 -40 0 255
+bnox 480 368 -240 16 -32 8 0 30 980 -3
 o2 0 110 5 0
 """
 
@@ -67,9 +68,22 @@ def test_every_sensor_decoded(sim, tmp_path):
     assert last["bme280"]["pres"] == pytest.approx(p, abs=0.02)
     assert last["bme280"]["hum"] == pytest.approx(h, abs=0.05)
     assert last["bme280"]["temp"] == 25.08 and last["bme280"]["pres"] == pytest.approx(1006.53, abs=0.01)  # datasheet example
-    assert last["bno055"] == {"heading_deg": 90.0, "roll_deg": -5.0, "pitch_deg": 2.0, "lin_acc_ms2": 0.5, "imu_calib": 3}
+    assert last["bno055"] == {"heading_deg": 90.0, "roll_deg": -5.0, "pitch_deg": 2.0, "lin_acc_ms2": 0.5, "imu_calib": 3,
+                              "grav_ms2": 9.80,             # |(0, 0.30, 9.80)| m/s²
+                              "mag_ut": 40.7,               # |(30, 23, -15)| µT
+                              "gyro_dps": 2.29,             # |(1, -2, 0.5)| °/s
+                              "temp": -3, "calib_gyro": 3, "calib_acc": 3, "calib_mag": 3}
+    assert "# bno055 self-test: accel=pass mag=pass gyro=pass mcu=pass" in notes
     assert last["o2"]["o2_pct"] == pytest.approx(20.9 / 120 * 110.5, abs=0.01)   # default key when uncalibrated
-    assert last["mq4"] == {"vout_mv": 1240, "warming": 1, "calibrated": 0}        # 620 mV × 2.0 divider; no ppm yet
+    # 620 mV × 2.0 divider; Rs/RL = (5000 - 1240) / 1240; no ppm yet
+    assert last["mq4"] == {"vout_mv": 1240, "rs_rl": 3.032, "warming": 1, "calibrated": 0}
+
+
+def test_bno055_self_test_and_calibration_parts(sim, tmp_path):
+    data, notes = sim("bnost 13\n" + BASE.replace("0 255", "0 54") + "run 2\n", tmp_path)   # mag failed; 0b00110110
+    assert "# bno055 self-test: accel=pass mag=FAIL gyro=pass mcu=pass" in notes
+    b = data[-1]["bno055"]
+    assert (b["imu_calib"], b["calib_gyro"], b["calib_acc"], b["calib_mag"]) == (0, 3, 1, 2)
 
 
 def test_scd40_every_5_s_with_crc_checked_words(sim, tmp_path):

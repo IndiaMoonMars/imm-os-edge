@@ -94,11 +94,13 @@ def sensors() -> Dict[str, Sensor]:
         "esp32": Sensor("sensor_drivers/esp32_bridge.py",
                         {"temp": (-10, 60), "hum": (0, 100), "pres": (300, 1100), "co2_ppm": (250, 5000),
                          "o2_pct": (15.0, 25.0), "heading_deg": (0, 360), "roll_deg": (-180, 180),
-                         "pitch_deg": (-180, 180), "imu_calib": (0, 3), "vout_mv": (50, 5000)},
+                         "pitch_deg": (-180, 180), "imu_calib": (0, 3), "vout_mv": (50, 5000),
+                         "grav_ms2": (9.3, 10.3), "mag_ut": (10, 100)},
                         usb=True, timeout_s=30, count=30, simulated=True, replaces=["bme280", "scd40", "o2"],
                         tip="board sensors: BME280/SCD40 against a room thermometer and fresh air (~420 ppm CO₂); "
                             "O₂ 20.9 % after CAL_O2 in fresh air; MQ-4 ppm only after 3 min warm-up and "
-                            "CAL_MQ4 in clean air (esp32_bridge.py --send CAL_MQ4); rotate the board until imu_calib is 3"),
+                            "CAL_MQ4 in clean air (esp32_bridge.py --send CAL_MQ4); rotate the board until imu_calib is 3; "
+                            "every value checked one by one, with hands-on tests: tools/verify_esp32.py"),
         "sysmon": Sensor("sensor_drivers/sysmon_driver.py", {"cpu_temp": (0, 85), "undervolt": (0, 0), "throttled": (0, 0)},
                          args=["--interval", "2"], timeout_s=15, simulated=True,
                          tip="undervolt=1 means the power supply is too weak (Pi 5: use the 27 W 5 V/5 A supply)"),

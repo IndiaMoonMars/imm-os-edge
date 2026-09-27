@@ -11,11 +11,19 @@ needs no Wi-Fi and stores no passwords.
 
 | Sensor | Connection | Published as |
 |---|---|---|
-| BME280 | I2C 0x76/0x77 | `bme280`: temp, hum, pres (same cards as a Pi-wired BME280) |
-| SCD40 | I2C 0x62 | `scd40`: co2_ppm, temp, hum (a new reading every 5 s) |
-| BNO055 | I2C 0x28/0x29 | `bno055`: heading, roll, pitch, linear acceleration, calibration 0–3 |
+| BME280 | I2C 0x76/0x77 | `bme280`: temp, hum, pres, dew_point_c (same cards as a Pi-wired BME280) |
+| SCD40 | I2C 0x62 | `scd40`: co2_ppm, temp, hum, dew_point_c (a new reading every 5 s) |
+| BNO055 | I2C 0x28/0x29 | `bno055`: heading, roll, pitch, linear acceleration, rotation rate, gravity, magnetic field, chip temperature, calibration 0–3 (system, gyro, accelerometer, magnetometer) |
 | DFRobot SEN0322 | I2C 0x70–0x73 | `o2`: o2_pct |
-| MQ-4 | AO → divider → GPIO32 | `mq4`: ch4_ppm, rs_r0 (after warm-up and calibration) |
+| MQ-4 | AO → divider → GPIO32 | `mq4`: vout_mv, rs_rl, warming, calibrated; rs_r0 and ch4_ppm after warm-up and calibration |
+
+dew_point_c is worked out on the Pi from temp and hum. The BNO055's power-on self-test
+(accelerometer, magnetometer, gyro, MCU) is printed with `STATUS` and at start-up.
+
+What the gas sensors can see: the SCD40 measures only CO₂ (infrared, 400–5000 ppm); the
+SEN0322 only O₂; the MQ-4 reacts most to methane but also to LPG, hydrogen, alcohol and
+smoke, without telling them apart, and reads 200–10000 ppm (below that, read it as "no
+methane").
 
 I2C is on GPIO21 (SDA) and GPIO22 (SCL), with the four I2C sensors powered from 3.3 V. The
 MQ-4 runs on 5 V.
@@ -72,6 +80,21 @@ same cable. Then, on the PC:
 ssh -t pratham@<pi-ip> "cd imm-os-edge && sudo .venv/bin/python tools/bringup.py esp32"
 ```
 
+## Check every value
+
+On the Pi (it pauses the esp32_bridge service while it runs):
+
+```bash
+cd ~/imm-os-edge && sudo .venv/bin/python tools/verify_esp32.py
+```
+
+It lists every value, checks each against physics and the sensors against each other (the
+BME280's and SCD40's dew points, O₂ against CO₂, gravity 9.8 m/s², the Earth's magnetic
+field, the BNO055 self-test, the MQ-4 signal), then guides hands-on tests: breathe on the
+board (CO₂, humidity, O₂), warm the BME280 with your hand, tilt and turn the board (BNO055),
+gas from an unlit lighter (MQ-4). `--auto` skips the hands-on part. The IMM-OS Sensors tab
+shows the same automatic checks live under each node.
+
 ## Calibration
 
 Send these commands with `pio device monitor` on the PC, or from the Pi with
@@ -83,7 +106,7 @@ Send these commands with `pio device monitor` on the PC, or from the Pi with
   - Until then, the board reports only the raw voltage.
   - ppm uses the datasheet curve for methane (ppm = 1012.7 × (Rs/R0)^−2.786, with Rs/R0 = 4.4 in clean air). Treat it as an estimate within the sensor's 200–10,000 ppm range, and check it against a reference gas detector.
 - **SEN0322 (oxygen):** in fresh outdoor air, send `CAL_O2`. The sensor then treats that reading as 20.9 %.
-- **BNO055:** it calibrates itself as it moves. `imm_calib` goes from 0 to 3, and 3 means fully calibrated. Rotate the board slowly through a few orientations to get there.
+- **BNO055:** it calibrates itself as it moves. `imu_calib` (and `calib_gyro`, `calib_acc`, `calib_mag`) go from 0 to 3, and 3 means fully calibrated. Rotate the board slowly through a few orientations to get there.
 - `STATUS` lists which sensors were found and the MQ-4 calibration.
 
 ## Test on a PC (no hardware)

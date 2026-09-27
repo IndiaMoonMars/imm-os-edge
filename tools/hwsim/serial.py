@@ -38,8 +38,9 @@ class Serial:
         if cmd == b"CAL":
             self._pending.append(b"# CAL: R0 is set at the end of this cycle (keep the sensor in clean air)\n")
         elif cmd == b"STATUS":
-            self._pending.append(b"# sensors: bme280=0x76 scd40=0x62 bno055=0x28 o2=found mq4_r0=1.200 divider=2.00\n"
-                                 if self.esp32 else b"# phase=5.0V elapsed_s=12 r0=1000 cycles=3\n")
+            self._pending += ([b"# sensors: bme280=0x76 scd40=0x62 bno055=0x28 o2=found mq4_r0=1.200 divider=2.00\n",
+                               b"# bno055 self-test: accel=pass mag=pass gyro=pass mcu=pass\n"]
+                              if self.esp32 else [b"# phase=5.0V elapsed_s=12 r0=1000 cycles=3\n"])
         elif cmd in (b"CAL_MQ4", b"CAL_O2"):
             self._pending.append(b"# " + cmd + b": ok (hwsim)\n")
         return len(data)
@@ -61,16 +62,19 @@ class Serial:
 
     def _esp32_line(self):
         ms = int((time.time() - self._t0) * 1000)
-        ch4 = max(0.5, wave(4.0, 2.0, 600, 0.3))
+        ch4 = max(0.5, wave(18.0, 3.0, 600, 0.3))        # clean air reads ~16 ppm on the MQ-4 curve (Rs/R0 4.4)
+        vout = round(930 * (ch4 / 18.0) ** 0.36)
         line = {"ms": ms,
                 "bme280": {"temp": round(wave(22.4, 0.4, 900, 0.03), 2), "hum": round(wave(44, 2, 1200, 0.1), 2),
                            "pres": round(wave(1009.5, 0.6, 3600, 0.05), 2)},
                 "bno055": {"heading_deg": round(wave(182, 1.5, 300, 0.2) % 360, 2), "roll_deg": round(wave(0.4, 0.3, 60, 0.05), 2),
                            "pitch_deg": round(wave(-1.2, 0.3, 75, 0.05), 2), "lin_acc_ms2": round(abs(wave(0.02, 0.02, 10, 0.01)), 2),
-                           "imu_calib": 3},
+                           "imu_calib": 3, "grav_ms2": round(wave(9.81, 0.02, 30, 0.01), 2),
+                           "mag_ut": round(wave(42.5, 0.6, 300, 0.3), 1), "gyro_dps": round(abs(wave(0.1, 0.1, 20, 0.05)), 2),
+                           "temp": 24, "calib_gyro": 3, "calib_acc": 3, "calib_mag": 3},
                 "o2": {"o2_pct": round(wave(20.9, 0.08, 1800, 0.02), 2)},
-                "mq4": {"vout_mv": round(930 * (ch4 / 4.0) ** 0.36), "rs_r0": round((ch4 / 1012.7) ** (1 / -2.786), 3),
-                        "ch4_ppm": round(ch4, 1), "warming": 0, "calibrated": 1}}
+                "mq4": {"vout_mv": vout, "rs_rl": round((5000 - vout) / vout, 3),
+                        "rs_r0": round((ch4 / 1012.7) ** (1 / -2.786), 3), "ch4_ppm": round(ch4, 1), "warming": 0, "calibrated": 1}}
         if ms // 1000 % 5 == 4:
             line["scd40"] = {"co2_ppm": round(wave(640, 40, 1800, 3)), "temp": round(wave(23.1, 0.4, 900, 0.03), 2),
                              "hum": round(wave(42, 2, 1200, 0.1), 2)}

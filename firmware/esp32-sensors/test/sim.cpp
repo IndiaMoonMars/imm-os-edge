@@ -6,6 +6,9 @@
 //     bme ADC_T ADC_P ADC_H       raw BME280 readings (datasheet calibration below)
 //     scd CO2 T_RAW RH_RAW        raw SCD40 words (a new measurement every 5 s while running)
 //     bno H R P AX AY AZ CALIB    BNO055 register values (1/16 deg, 1/100 m/s², CALIB_STAT)
+//     bnox MX MY MZ GX GY GZ VX VY VZ TEMP   BNO055 magnetometer (1/16 µT), gyro (1/16 °/s),
+//                                 gravity (1/100 m/s²), temperature (°C)
+//     bnost BITS                  BNO055 self-test result (ST_RESULT) after its next reset
 //     o2 KEY D0 D1 D2             SEN0322 key register and oxygen data registers
 //     remove DEV | add DEV        take a device off / put it back on the bus (bme scd bno o2)
 //     bmp                         the BME280 answers as a BMP280 (chip ID 0x58)
@@ -103,7 +106,7 @@ struct Scd40Dev : I2CDevice {
 };
 
 struct Bno055Dev : RegDevice {
-  Bno055Dev() { reg[0x00] = 0xA0; }
+  Bno055Dev() { reg[0x00] = 0xA0; reg[0x36] = 0x0F; }          // chip ID; self-test all passed
 };
 
 struct Sen0322Dev : RegDevice {};
@@ -133,7 +136,7 @@ int main(int, char** argv) {
   while (std::getline(in, line)) {
     std::istringstream ss(line);
     std::string op; ss >> op;
-    if (!started && op != "remove" && op != "bmp" && op != "o2" && op != "mq4" && op != "bmeignore") { setup(); started = true; flush(); }
+    if (!started && op != "remove" && op != "bmp" && op != "o2" && op != "mq4" && op != "bmeignore" && op != "bnost") { setup(); started = true; flush(); }
     if (op == "run") {
       double s; ss >> s;
       const uint32_t end = sim::now_ms + (uint32_t)(s * 1000);
@@ -147,6 +150,13 @@ int main(int, char** argv) {
       for (int i = 0; i < 3; i++) bnoDev.put16le(0x1A + 2 * i, v[i]);
       for (int i = 0; i < 3; i++) bnoDev.put16le(0x28 + 2 * i, v[3 + i]);
       bnoDev.reg[0x35] = (uint8_t)c;
+    } else if (op == "bnox") {
+      int v[9], t; for (int& x : v) ss >> x; ss >> t;
+      for (int i = 0; i < 3; i++) bnoDev.put16le(0x0E + 2 * i, v[i]);
+      for (int i = 0; i < 3; i++) bnoDev.put16le(0x14 + 2 * i, v[3 + i]);
+      for (int i = 0; i < 3; i++) bnoDev.put16le(0x2E + 2 * i, v[6 + i]);
+      bnoDev.reg[0x34] = (uint8_t)(int8_t)t;
+    } else if (op == "bnost") { int b; ss >> b; bnoDev.reg[0x36] = (uint8_t)b;
     } else if (op == "o2") {
       int k, a, b, c; ss >> k >> a >> b >> c;
       o2Dev.reg[0x0A] = k; o2Dev.reg[0x03] = a; o2Dev.reg[0x04] = b; o2Dev.reg[0x05] = c;
