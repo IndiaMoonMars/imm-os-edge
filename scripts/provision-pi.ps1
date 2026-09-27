@@ -41,7 +41,9 @@ param(
     # Keep simulating this node's health data even when the checks pass
     [switch]$KeepSim,
     # Show what setup would do on the Pi; change nothing there, no reboot
-    [switch]$DryRun
+    [switch]$DryRun,
+    # Only copy this checkout to the Pi (e.g. before scripts/flash-esp32.sh); no setup, no reboot
+    [switch]$CopyOnly
 )
 
 # Kept ASCII-only: Windows PowerShell 5.1 misreads other characters in files without a BOM.
@@ -189,6 +191,7 @@ if ($rc -ne 0) { Fail 'scp failed' }
 if ($LASTEXITCODE -ne 0) { Fail 'unpacking on the Pi failed' }
 Remove-Item -Recurse -Force -LiteralPath $stage
 Ok 'code in ~/imm-os-edge, CA in ~/mqtt-ca.crt'
+if ($CopyOnly) { Write-Host ''; Write-Host 'Copied (-CopyOnly): setup, services and the simulator were left as they are.'; exit 0 }
 
 # ---- 4. Setup --------------------------------------------------------------
 Step 'Running setup-node.sh on the Pi (first run takes 5-15 minutes)'

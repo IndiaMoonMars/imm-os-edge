@@ -25,7 +25,26 @@ tolerates about 3.6 V. The board has 10 kΩ from AO to GPIO32 and 10 kΩ from GP
 (scale ×2.0, so 5 V at AO is 2.5 V at the pin). If your resistors differ, set `MQ4_DIVIDER` in `platformio.ini` to
 (top + bottom) / bottom.
 
-## Flash it (Windows)
+## Flash it from the Pi (no laptop USB needed)
+
+Plug the board into a Pi USB port (USB-A to the board's connector, a **data** cable). Then,
+in PowerShell on the MCC PC:
+
+```powershell
+cd C:\Users\PRATHAM\Documents\imm-os-edge
+git pull origin claude/github-app-repo-connect-ftvi8y
+powershell -ExecutionPolicy Bypass -File .\scripts\provision-pi.ps1 -PiUser pratham -PiHost <pi-ip> -CopyOnly
+ssh -t pratham@<pi-ip> "cd imm-os-edge && ./scripts/flash-esp32.sh"
+```
+
+`-CopyOnly` copies the latest code to the Pi and nothing else. `flash-esp32.sh`:
+- installs PlatformIO on the Pi the first time (a few minutes; the first build also downloads the ESP32 toolchain);
+- builds and flashes the board;
+- shows its first 15 s of output.
+
+If the upload waits at `Connecting....`, hold the board's **BOOT** button until it starts.
+
+## Flash it from a Windows PC
 
 1. Install [VS Code](https://code.visualstudio.com/), then the **PlatformIO IDE** extension.
 2. Plug the ESP32 into the PC with a USB **data** cable. If Windows doesn't show a COM

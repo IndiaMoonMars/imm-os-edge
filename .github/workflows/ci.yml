@@ -19,6 +19,6 @@ jobs:
       - name: Compile all scripts
         run: python -m compileall -q core eclss eva sensor_drivers simulator inventory tools
       - name: Check shell scripts
-        run: bash -n scripts/setup-node.sh systemd/deploy_services.sh
+        run: bash -n scripts/setup-node.sh scripts/flash-esp32.sh systemd/deploy_services.sh
       - name: Run tests
         run: pytest -q tests
