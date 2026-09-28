@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from biometrics import heart_rate, spo2  # noqa: E402
 from calibration import default as calibration  # noqa: E402
 from eva_mqtt import connect, crew_id  # noqa: E402
+import watchdog  # noqa: E402
 from hw import env_int, simulate_requested  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [eva_bio] %(message)s")
@@ -180,7 +181,7 @@ def main():
         if any(k in frame for k in ("hr_bpm", "spo2_pct", "skin_temp_c", "ecg_mv")):
             client.publish(topic, json.dumps(frame))
         t += 0.2
-        time.sleep(0.2)
+        watchdog.sleep(0.2)
 
 
 if __name__ == "__main__":

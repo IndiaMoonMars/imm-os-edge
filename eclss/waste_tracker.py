@@ -25,6 +25,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from hw import EventPoster, env_float, env_int, simulate_requested  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [waste_tracker] %(message)s")
 log = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ def main():
         while True:
             log.info("Deposit 1.0 kg | TAG_FOOD_WASTE_01 (simulated)")
             poster.post({"weight_kg": 1.0, "rfid_tag": "TAG_FOOD_WASTE_01", "container": container})
-            time.sleep(30)
+            watchdog.sleep(30)
 
     if not os.getenv("HX711_SCALE"):
         raise SystemExit("HX711_SCALE not set: run  waste_tracker.py --calibrate 1.0  first")
@@ -140,13 +141,13 @@ def main():
             kg = detector.update(hx.weight())
         except TimeoutError as exc:
             log.error("Scale read failed: %s", exc)
-            time.sleep(5)
+            watchdog.sleep(5)
             continue
         if kg is not None:
             tag = last_tag.take()
             log.info("Deposit %.3f kg | %s", kg, tag)
             poster.post({"weight_kg": kg, "rfid_tag": tag, "container": container})
-        time.sleep(1.0)
+        watchdog.sleep(1.0)
 
 
 if __name__ == "__main__":

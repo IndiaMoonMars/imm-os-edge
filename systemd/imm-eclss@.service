@@ -3,6 +3,9 @@ Description=IMM-OS ECLSS daemon (%i)
 After=network-online.target
 Wants=network-online.target
 
+# Never give up restarting (the node reports restarts: sysmon svc_restarts → MCC alarm)
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 # The user needs the gpio, i2c, spi, dialout and input groups (see real-sensors/README.md)
@@ -15,7 +18,13 @@ StateDirectory=imm-os
 # %i is the script name without .py, e.g. water_monitor
 ExecStart=/usr/bin/python3 eclss/%i.py
 Restart=always
-RestartSec=10
+RestartSec=5
+# Watchdog (core/watchdog.py): the main loop must check in every 60 s or systemd kills
+# the service and restarts it. NotifyAccess=all: in a pipeline the driver is not the main
+# process. The fault handler prints the stack where it hung into the journal.
+WatchdogSec=60
+NotifyAccess=all
+Environment="PYTHONFAULTHANDLER=1"
 StandardError=journal
 
 [Install]

@@ -29,6 +29,7 @@ from typing import Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from calibration import default as calibration  # noqa: E402
 from hw import EventPoster, env_float, env_int, simulate_requested  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [biolab_monitor] %(message)s")
 log = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ def main():
         else:
             log.info("pH %.2f | water %.2f °C", ph, temp)
             poster.post({"ph_level": round(ph, 2), "water_temp_c": round(temp, 2)})
-        time.sleep(interval)
+        watchdog.sleep(interval)
 
 
 if __name__ == "__main__":

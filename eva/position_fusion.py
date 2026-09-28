@@ -11,8 +11,12 @@ import json
 import time
 import logging
 import threading
-import paho.mqtt.client as mqtt
 import os
+import sys
+import paho.mqtt.client as mqtt
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [pos_fusion] %(message)s")
 log = logging.getLogger(__name__)
@@ -74,7 +78,7 @@ def fuse_and_publish(pub_client: mqtt.Client):
             pub_client.publish(topic, json.dumps(unified))
             log.info(f"[{crew_id}] mode={unified['mode']} quality={unified['quality']}")
 
-        time.sleep(0.2)
+        watchdog.sleep(0.2)
 
 def main():
     client = mqtt.Client(client_id="pos-fusion")

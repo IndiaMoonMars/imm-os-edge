@@ -8,6 +8,8 @@
 #   EVA daemons        IMM_EVA_DAEMONS="gps_driver uwb_driver position_fusion"
 #   lighting listener  always (logs only until LIGHT_ZONES is set)
 #   MCC discovery      always: a timer re-finds the MCC if its IP address changes
+# Every service has a systemd watchdog (core/watchdog.py) and restarts forever; the Pi's
+# hardware watchdog is switched on (systemd/imm-watchdog.conf).
 # The lists are read from /etc/imm-os/edge.env; scripts/setup-node.sh writes them.
 #
 # Overridable: IMM_HOME (default: this checkout), IMM_USER (default: owner of IMM_HOME),
@@ -50,6 +52,17 @@ for unit in imm-sensor-pipeline@.service imm-lighting-controller.service imm-ecl
 done
 install -d -o "$IMM_USER" -g "$IMM_USER" /var/lib/imm-os /var/lib/imm-os/blackbox /var/lib/imm-os/spool
 systemctl daemon-reload
+
+# Hardware watchdog: a hung kernel or systemd resets the Pi (systemd/imm-watchdog.conf)
+if [ -e /dev/watchdog ] || [ -e /dev/watchdog0 ]; then
+    if ! cmp -s "$HERE/imm-watchdog.conf" /etc/systemd/system.conf.d/imm-watchdog.conf 2>/dev/null; then
+        install -D -m 644 "$HERE/imm-watchdog.conf" /etc/systemd/system.conf.d/imm-watchdog.conf
+        systemctl daemon-reexec
+        echo "Hardware watchdog on (systemd pets it every few seconds; a hang resets the Pi)"
+    fi
+else
+    echo "  ! no /dev/watchdog: hardware watchdog not enabled (add dtparam=watchdog=on to /boot/firmware/config.txt)"
+fi
 
 # Sensor pipelines: arguments win, then IMM_SENSORS. Nothing is started by default,
 # so a node never runs drivers for hardware it doesn't have.

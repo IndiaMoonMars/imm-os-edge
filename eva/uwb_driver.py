@@ -25,6 +25,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from eva_mqtt import connect, crew_id  # noqa: E402
+import watchdog  # noqa: E402
 from hw import env_int, simulate_requested  # noqa: E402
 from positioning import parse_dwm_lec  # noqa: E402
 
@@ -80,6 +81,7 @@ def main():
     source = positions_simulated() if simulate_requested(args.simulate) else positions_from_dwm1001()
     log.info("UWB for %s → %s", crew, TOPIC)
     for pos in source:
+        watchdog.kick()
         client.publish(TOPIC, json.dumps({"crew_id": crew, "source": "uwb", **pos, "timestamp": int(time.time())}))
 
 

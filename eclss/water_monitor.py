@@ -23,6 +23,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from hw import EventPoster, digital_input, env_float, env_int, simulate_requested  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [water_monitor] %(message)s")
 log = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ def run_hardware(poster: EventPoster, source: str) -> None:
             total = daily.add(ml)
             log.info("Draw of %.0f mL on %s (today %.0f mL)", ml, source, total)
             poster.post({"event_ml": ml, "daily_total_ml": total, "source": source})
-        time.sleep(0.5)
+        watchdog.sleep(0.5)
 
 
 def run_simulated(poster: EventPoster, source: str) -> None:
@@ -100,7 +101,7 @@ def run_simulated(poster: EventPoster, source: str) -> None:
         total = daily.add(500.0)
         log.info("Draw of 500 mL (simulated, today %.0f mL)", total)
         poster.post({"event_ml": 500.0, "daily_total_ml": total, "source": source})
-        time.sleep(60)
+        watchdog.sleep(60)
 
 
 def main():

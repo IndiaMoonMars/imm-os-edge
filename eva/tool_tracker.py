@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from hw import EventPoster, simulate_requested  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [tool_tracker] %(message)s")
 log = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ def main():
 
     from tag_readers import open_tag_reader
     log.info("Tool station ready (%s mode, %d tools out)", mode, len(state.out))
-    for tag in open_tag_reader("TOOL_RFID"):
+    for tag in open_tag_reader("TOOL_RFID"):     # the readers kick while waiting for a card
         scan(poster, state, tag.strip().upper(), names)
 
 

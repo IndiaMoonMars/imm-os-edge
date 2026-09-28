@@ -24,6 +24,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from eva_mqtt import connect, crew_id  # noqa: E402
+import watchdog  # noqa: E402
 from hw import env_int, simulate_requested, uart_port  # noqa: E402
 from positioning import parse_nmea  # noqa: E402
 
@@ -93,7 +94,8 @@ def main():
     source = sentences_simulated() if simulate_requested(args.simulate) else sentences_from_serial()
     log.info("GPS for %s → %s", fix.crew, TOPIC)
     last_log = 0.0
-    for sentence in source:
+    for sentence in source:      # a GPS module sends NMEA every second, fix or not
+        watchdog.kick()
         frame = fix.feed(sentence)
         if frame:
             client.publish(TOPIC, json.dumps(frame))

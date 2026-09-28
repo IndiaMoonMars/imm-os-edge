@@ -31,6 +31,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from hw import LogRelay, Relay, env_float, env_int, simulate_requested  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [eclss_climate] %(message)s")
 log = logging.getLogger(__name__)
@@ -144,6 +145,7 @@ def control_loop(get_values, hvac, dehum, temp_ctl, hum_ctl, stale_s, period_s, 
                      "ON" if temp_ctl.on else "off", "ON" if hum_ctl.on else "off")
         hvac.set(temp_ctl.on)
         dehum.set(hum_ctl.on)
+        watchdog.kick()
         stop.wait(period_s)
 
 

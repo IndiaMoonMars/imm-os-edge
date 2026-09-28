@@ -73,7 +73,12 @@ def make_publisher(mode: str, default_topic: str = None):
     """Return publish_fn(payload, topic=None) for --mode stdout | mqtt | both."""
     client = create_client() if mode in ("mqtt", "both") else None
 
+    import watchdog
+
     def publish_fn(payload: dict, topic: str = None) -> None:
+        # each reading proves the driver's loop is alive (and that the blackbox pipe
+        # is draining: print() below blocks when it is not)
+        watchdog.kick()
         msg, t = stamp(payload, topic or default_topic)
         if client is not None:
             publish(client, t, msg)

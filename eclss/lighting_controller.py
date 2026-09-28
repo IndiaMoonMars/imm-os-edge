@@ -137,7 +137,14 @@ def listen_loop():
     client.on_message = on_lighting_message
     client.reconnect_delay_set(min_delay=1, max_delay=30)
     client.connect_async(host, port, keepalive=60)
-    client.loop_forever(retry_first_connection=True)
+    client.loop_start()
+    import watchdog
+    while True:
+        # the network thread (paho) does the work and reconnects; the main thread only
+        # vouches for it, so a dead network thread stops the kicks and systemd restarts us
+        if client._thread is not None and client._thread.is_alive():
+            watchdog.kick()
+        time.sleep(2)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import os
 import sys
 import time
 from typing import Iterator
+import watchdog  # core/watchdog.py (same directory)
 
 log = logging.getLogger("imm.tags")
 
@@ -58,12 +59,18 @@ def read_hid(path: str) -> Iterator[str]:
     log.info("Reading %s (%s)", dev.name, path)
 
     def events():
-        for event in dev.read_loop():
-            if event.type != ecodes.EV_KEY:
+        import select
+        while True:
+            watchdog.kick()                 # waiting for a scan is not a hang
+            ready, _, _ = select.select([dev.fd], [], [], 5.0)
+            if not ready:
                 continue
-            key = categorize(event)
-            name = key.keycode if isinstance(key.keycode, str) else key.keycode[0]
-            yield name, key.keystate
+            for event in dev.read():
+                if event.type != ecodes.EV_KEY:
+                    continue
+                key = categorize(event)
+                name = key.keycode if isinstance(key.keycode, str) else key.keycode[0]
+                yield name, key.keystate
 
     try:
         yield from decode_keys(events())
@@ -88,7 +95,7 @@ def read_rc522(poll_s: float = 0.2, rearm_s: float = 2.0) -> Iterator[str]:
             if uid != last_uid or now - last_seen > rearm_s:
                 yield uid
             last_uid, last_seen = uid, now
-        time.sleep(poll_s)
+        watchdog.sleep(poll_s)
 
 
 def read_stdin() -> Iterator[str]:

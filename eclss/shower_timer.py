@@ -21,6 +21,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from hw import EventPoster, digital_input, env_float, env_int, simulate_requested  # noqa: E402
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [shower_timer] %(message)s")
 log = logging.getLogger(__name__)
@@ -79,7 +80,7 @@ def main():
         duration = session.update(bool(pir.value), time.monotonic())
         if duration is not None:
             report(poster, duration, lpm)
-        time.sleep(0.5)
+        watchdog.sleep(0.5)
 
 
 if __name__ == "__main__":
