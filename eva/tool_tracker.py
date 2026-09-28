@@ -32,7 +32,6 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from hw import EventPoster, simulate_requested  # noqa: E402
-import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [tool_tracker] %(message)s")
 log = logging.getLogger(__name__)

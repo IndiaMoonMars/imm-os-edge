@@ -373,3 +373,13 @@ def test_stm32_answers(monkeypatch, lines, expected):
     sys.modules["serial"].Serial = lambda *a, **kw: port
     assert bringup.stm32_answers("/dev/ttyAMA0", wait_s=0.3) is expected
     assert port.written == b"STATUS\n"
+
+
+def test_sysmon_counts_failed_services_and_restarts():
+    sys.path.insert(0, os.path.join(ROOT, "sensor_drivers"))
+    import sysmon_driver
+    out = ("Id=imm-sensor-pipeline@bme280_driver.py.service\nActiveState=active\nNRestarts=2\n\n"
+           "Id=imm-eclss@eclss_pid.service\nActiveState=failed\nNRestarts=5\n\n"
+           "Id=imm-mcc-discovery.service\nActiveState=failed\nNRestarts=0\n\n"
+           "Id=imm-mcc-discovery.timer\nActiveState=active\n")
+    assert sysmon_driver.parse_units(out) == (1, 7)       # discovery (MCC not found) is not a crash

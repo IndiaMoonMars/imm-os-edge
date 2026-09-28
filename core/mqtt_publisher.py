@@ -13,12 +13,18 @@ node's identity before it leaves the node:
   node_id    IMM_NODE_ID (default: hostname)
   zone       the payload's own zone, else IMM_ZONE, else the topic's last segment
   simulated  false (real hardware)
+  seq, run   a counter per topic and an ID for this run of the driver: the MCC counts
+             readings that never arrived (gaps) and ones filled in later (blackbox replay)
+
+MQTT_HOST is normally localhost: the node's own broker, which forwards to the MCC and
+queues on disk while the MCC is unreachable (tools/local_broker.py).
 """
 
 import os
 import json
 import socket
 import sys
+import uuid
 import paho.mqtt.client as mqtt
 
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
@@ -50,10 +56,19 @@ def publish(client: mqtt.Client, topic: str, payload: dict) -> None:
     client.publish(topic, msg, qos=MQTT_QOS)
 
 
+RUN_ID = uuid.uuid4().hex[:12]      # this process's run: a restart starts new sequences
+_seq: dict = {}
+
+
+def next_seq(topic: str) -> int:
+    _seq[topic] = _seq.get(topic, 0) + 1
+    return _seq[topic]
+
+
 def stamp(payload: dict, topic: str) -> tuple:
     """
     Apply this node's calibration (/etc/imm-os/calibration.yaml), add node_id / zone /
-    simulated, and return (payload, topic) with IMM_ZONE applied.
+    simulated / seq / run, and return (payload, topic) with IMM_ZONE applied.
     """
     from calibration import default as calibration
     out = calibration().apply(payload)
@@ -66,6 +81,8 @@ def stamp(payload: dict, topic: str) -> tuple:
         topic = "/".join(parts)
     if "zone" not in out and len(parts) == 4:
         out["zone"] = parts[3]
+    if "seq" not in out:
+        out["seq"], out["run"] = next_seq(topic), RUN_ID
     return out, topic
 
 

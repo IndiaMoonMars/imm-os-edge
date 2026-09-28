@@ -2,7 +2,7 @@
 """
 Keep `imm.local` pointing at the MCC when the MCC PC's IP address changes.
 
-Edge nodes reach the MCC by name (MQTT_HOST, normally imm.local), which setup-node.sh
+Edge nodes reach the MCC by name (MCC_HOST, normally imm.local), which setup-node.sh
 maps to the PC's LAN address in /etc/hosts. A laptop MCC gets a new address from DHCP,
 or moves to another Wi-Fi network. This check runs every minute (imm-mcc-discovery.timer):
 
@@ -14,8 +14,8 @@ or moves to another Wi-Fi network. This check runs every minute (imm-mcc-discove
      boot). Only a machine holding the MCC's certificate matches, so no other device can
      take its place.
 
-The drivers' MQTT clients and the Keycloak login resolve the name again on their next
-reconnect or request, so they follow on their own.
+The local broker's bridge, the drivers' MQTT clients (--direct nodes) and the Keycloak
+login resolve the name again on their next reconnect or request, so they follow on their own.
 
   sudo .venv/bin/python tools/find_mcc.py            # check, rescan if needed
   sudo .venv/bin/python tools/find_mcc.py --scan     # rescan even if the current address works
@@ -128,7 +128,9 @@ def set_host(path: str, name: str, ip: str) -> bool:
 def config(env_file: str = ENV_FILE):
     lines = open(env_file).read().splitlines() if os.path.exists(env_file) else []
     get = lambda k, d=None: os.getenv(k) or envfile.get(lines, k) or d   # noqa: E731
-    return get("MQTT_HOST", "imm.local"), int(get("MQTT_PORT", "8883")), get("MQTT_TLS_CA")
+    # MCC_* (local broker mode: MQTT_* then point at localhost), else the older MQTT_* keys
+    return (get("MCC_HOST") or get("MQTT_HOST", "imm.local"), int(get("MCC_MQTT_PORT") or get("MQTT_PORT", "8883")),
+            get("MCC_TLS_CA") or get("MQTT_TLS_CA"))
 
 
 def discover(name, port, ca, networks, force=False, check=is_mcc, resolver=resolve,
@@ -160,7 +162,7 @@ def main():
         sys.exit(2)
     try:
         ipaddress.IPv4Address(name)
-        print(f"MQTT_HOST is an IP address ({name}); nothing to discover")
+        print(f"MCC_HOST is an IP address ({name}); nothing to discover")
         sys.exit(0)
     except ValueError:
         pass

@@ -16,6 +16,11 @@ jobs:
       - name: Install test dependencies
         # hardware libraries (gpiozero, smbus2, ...) are imported lazily and not needed for the logic tests
         run: pip install pytest paho-mqtt==1.6.1 requests pyyaml protobuf==4.25.3
+      - name: Install Mosquitto (store-and-forward and replay tests run real brokers)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends mosquitto
+          sudo systemctl stop mosquitto || true
       - name: Compile all scripts
         run: python -m compileall -q core eclss eva sensor_drivers simulator inventory tools
       - name: Check shell scripts

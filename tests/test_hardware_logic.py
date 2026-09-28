@@ -1,5 +1,6 @@
 """Pure-logic tests for the ECLSS/EVA hardware scripts (no hardware or network needed)."""
 import json
+import time
 import math
 import random
 
@@ -219,3 +220,56 @@ def test_event_poster_spools_when_offline_and_flushes_in_order(tmp_path, monkeyp
     assert sent == [1, 2, 3] and not p.spool.exists()
     assert p.post({"n": 99}) == "rejected"                     # 4xx: dropped, not spooled
     assert not p.spool.exists()
+
+
+def test_climate_degraded_modes_are_reported():
+    import threading
+    from eclss_pid import Hysteresis, control_loop
+    from health import ComponentHealth
+    from hw import LogRelay
+
+    class Pub:
+        def __init__(self):
+            self.msgs = []
+
+        def publish(self, topic, payload, qos=0, retain=False):
+            self.msgs.append((topic, json.loads(payload), retain))
+
+    def run(values, relay=None, steps=2):
+        hvac, dehum = relay or LogRelay("HVAC"), LogRelay("Dehum")
+        t, h = Hysteresis(22, 1, 0, 0), Hysteresis(50, 5, 0, 0)
+        h.on = True                           # dehumidifier was running
+        stop, n, pub = threading.Event(), [0], Pub()
+
+        def get():
+            n[0] += 1
+            if n[0] >= steps:
+                stop.set()
+            return values()
+        control_loop(get, hvac, dehum, t, h, stale_s=120, period_s=0, stop=stop,
+                     health=ComponentHealth("eclss_pid", client=pub, node="node-rpi-01"))
+        return pub.msgs[-1][1], dehum, pub.msgs[-1]
+
+    now = time.monotonic
+    msg, dehum, raw = run(lambda: (23.5, 60.0, now()))
+    assert msg["state"] == "NOMINAL" and raw[0] == "habitat/health/node-rpi-01/eclss_pid" and raw[2] is True
+    msg, dehum, _ = run(lambda: (23.5, None, now()))
+    assert msg["state"] == "DEGRADED" and dehum.is_on is False        # no humidity: dehumidifier off
+    msg, dehum, _ = run(lambda: (23.5, 60.0, now() - 1000))
+    assert msg["state"] == "SAFE"
+
+    class Broken(LogRelay):
+        def set(self, on):
+            if on:
+                raise OSError("GPIO busy")
+            super().set(on)
+    msg, _, _ = run(lambda: (30.0, 50.0, now()), relay=Broken("HVAC"))
+    assert msg["state"] == "FAULT" and "GPIO busy" in msg["reason"]
+
+
+def test_climate_humidity_goes_stale_on_its_own():
+    from eclss_pid import LatestReadings
+    r = LatestReadings("node-rpi-01")
+    r.feed({"sensor": "bme280", "node_id": "node-rpi-01", "temp": 22.0, "hum": 45}, 0)
+    r.feed({"sensor": "bme280", "node_id": "node-rpi-01", "temp": 22.1}, 90)      # humidity stopped
+    assert r.snapshot() == (22.1, None, 90)

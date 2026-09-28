@@ -10,6 +10,14 @@ its setpoint plus minimum on/off times (compressors must not short-cycle).
 Fail-safe: relays are de-energised (OFF) at start-up, on exit, and whenever no
 fresh reading has arrived for CLIMATE_STALE_S seconds.
 
+Degraded modes, reported to the MCC as habitat/health/<node>/eclss_pid (core/health.py):
+  NOMINAL    both loops running
+  DEGRADED   no fresh humidity: dehumidifier off, temperature control continues
+  SAFE       no fresh temperature: both relays off until readings return
+  FAULT      a relay could not be switched (GPIO error): all outputs commanded off
+The readings come through the node's own broker, so an MCC or network outage does
+not stop the controller.
+
 Environment:
   HVAC_RELAY_GPIO=23  DEHUM_RELAY_GPIO=24  RELAY_ACTIVE_LOW=true
   TEMP_SETPOINT_C=22  TEMP_BAND_C=1.0      → cool above 23 °C, stop below 21 °C
@@ -32,6 +40,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
 from hw import LogRelay, Relay, env_float, env_int, simulate_requested  # noqa: E402
 import watchdog  # noqa: E402
+from health import ComponentHealth  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [eclss_climate] %(message)s")
 log = logging.getLogger(__name__)
@@ -64,13 +73,20 @@ class Hysteresis:
 
 
 class LatestReadings:
-    """Newest temperature/humidity for one node from sensor MQTT messages."""
+    """
+    Newest temperature/humidity for one node from sensor MQTT messages. snapshot() gives
+    (temp, hum, temp time); humidity counts only while it is not HUM_MAX_LAG_S older than
+    the temperature, so a humidity source that stops can't keep the dehumidifier running
+    on its last value.
+    """
     PREFERENCE = {"bme280": 0, "scd40": 1}
+    HUM_MAX_LAG_S = 60.0
 
     def __init__(self, node_id: str):
         self.node_id = node_id
         self.temp = self.hum = None
         self.at = 0.0
+        self.hum_at = 0.0
         self._src = {}
         self._lock = threading.Lock()
 
@@ -88,11 +104,15 @@ class LatestReadings:
                 if cur is None or self.PREFERENCE[sensor] <= self.PREFERENCE[cur[0]] or now - cur[1] > 60:
                     setattr(self, attr, float(v))
                     self._src[attr] = (sensor, now)
-            self.at = now
+                    if attr == "temp":
+                        self.at = now
+                    else:
+                        self.hum_at = now
 
     def snapshot(self):
         with self._lock:
-            return self.temp, self.hum, self.at
+            hum = self.hum if self.hum is not None and self.at - self.hum_at <= self.HUM_MAX_LAG_S else None
+            return self.temp, hum, self.at
 
 
 def subscribe_readings(latest: LatestReadings):
@@ -124,29 +144,48 @@ def subscribe_readings(latest: LatestReadings):
     return client
 
 
-def control_loop(get_values, hvac, dehum, temp_ctl, hum_ctl, stale_s, period_s, stop):
-    stale_logged = False
+def control_loop(get_values, hvac, dehum, temp_ctl, hum_ctl, stale_s, period_s, stop, health=None):
+    health = health or ComponentHealth("eclss_pid", client=_NullClient())
     while not stop.is_set():
         now = time.monotonic()
         temp, hum, at = get_values()
         if temp is None or now - at > stale_s:
-            if not stale_logged:
-                log.warning("No fresh temperature/humidity for %.0f s: relays OFF (fail-safe)", stale_s)
-                stale_logged = True
+            state = ("SAFE", f"no fresh temperature for {stale_s:.0f} s: HVAC and dehumidifier off")
             temp_ctl.force_off(now)
             hum_ctl.force_off(now)
         else:
-            stale_logged = False
             temp_ctl.decide(temp, now)
             if hum is not None:
                 hum_ctl.decide(hum, now)
+                state = ("NOMINAL", "")
+            else:
+                hum_ctl.force_off(now)
+                state = ("DEGRADED", "no fresh humidity: dehumidifier off, temperature control only")
             log.info("%.2f °C (set %.1f) | %s %% (set %.0f) | HVAC %s | dehumidifier %s",
                      temp, temp_ctl.setpoint, f"{hum:.1f}" if hum is not None else "n/a", hum_ctl.setpoint,
                      "ON" if temp_ctl.on else "off", "ON" if hum_ctl.on else "off")
-        hvac.set(temp_ctl.on)
-        dehum.set(hum_ctl.on)
+        try:
+            hvac.set(temp_ctl.on)
+            dehum.set(hum_ctl.on)
+        except Exception as exc:            # GPIO/relay failure: command everything off, report
+            log.error("Relay switching failed: %s", exc)
+            temp_ctl.force_off(now)
+            hum_ctl.force_off(now)
+            for relay in (hvac, dehum):
+                try:
+                    relay.set(False)
+                except Exception:
+                    pass
+            state = ("FAULT", f"relay could not be switched ({exc}): outputs commanded off")
+        health.set(*state, temp=temp, hum=hum, hvac=temp_ctl.on, dehumidifier=hum_ctl.on)
+        health.tick()
         watchdog.kick()
         stop.wait(period_s)
+
+
+class _NullClient:
+    def publish(self, *a, **k):
+        pass
 
 
 class SimulatedRoom:
@@ -191,11 +230,13 @@ def main():
     signal.signal(signal.SIGTERM, lambda *a: stop.set())
     signal.signal(signal.SIGINT, lambda *a: stop.set())
     log.info("Climate controller started (%s)", "simulated" if simulate else "relays live")
+    health = ComponentHealth("eclss_pid", interval_s=30)
     try:
-        control_loop(get_values, hvac, dehum, temp_ctl, hum_ctl, env_float("CLIMATE_STALE_S", 120), period, stop)
+        control_loop(get_values, hvac, dehum, temp_ctl, hum_ctl, env_float("CLIMATE_STALE_S", 120), period, stop, health)
     finally:
         hvac.close()
         dehum.close()
+        health.set("STOPPED", "controller stopped: relays off")
         log.info("Relays OFF, controller stopped")
 
 

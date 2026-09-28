@@ -14,6 +14,11 @@ Publishes on habitat/sensors/sysmon/<zone> every --interval seconds:
   undervolt       1 while the supply is below ~4.63 V (`vcgencmd get_throttled` bit 0)
   throttled       1 while the CPU is throttled or frequency-capped (bits 1, 2)
   undervolt_boot  1 if under-voltage happened at any time since boot (bit 16)
+  svc_failed      IMM-OS services (imm-*.service) currently failed
+  svc_restarts    automatic restarts of IMM-OS services since they were started (watchdog,
+                  crashes): the MCC raises an alarm when it keeps climbing
+  mcc_link        1 while the local broker's bridge to the MCC is up, 0 while it queues
+  mqtt_backlog    readings queued in the local broker for the MCC
 
 A Pi 5 needs the 27 W (5 V / 5 A) supply: on a 3 A supply undervolt/undervolt_boot
 flag it and USB current is limited. vcgencmd needs the service user in the `video` group.
@@ -128,6 +133,73 @@ def parse_throttled(text: str):
     return {"undervolt": bits & 0x1, "throttled": int(bool(bits & 0x6)), "undervolt_boot": int(bool(bits & 0x10000))}
 
 
+SKIP_UNITS = {"imm-mcc-discovery.service"}   # a periodic check; its failure means "MCC not found", not a crash
+
+
+def parse_units(show_output: str):
+    """`systemctl show -p Id -p ActiveState -p NRestarts <units>` → (failed, restarts)."""
+    failed = restarts = 0
+    for block in show_output.strip().split("\n\n"):
+        props = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if not props.get("Id", "").endswith(".service") or props.get("Id") in SKIP_UNITS:
+            continue
+        failed += props.get("ActiveState") == "failed"
+        try:
+            restarts += int(props.get("NRestarts") or 0)
+        except ValueError:
+            pass
+    return failed, restarts
+
+
+def service_health():
+    if not shutil.which("systemctl"):
+        return {}
+    try:
+        units = subprocess.run(["systemctl", "list-units", "--all", "--plain", "--no-legend", "imm-*"],
+                               capture_output=True, text=True, timeout=10).stdout.split()
+        units = [u for u in units if u.startswith("imm-") and u.endswith(".service")]
+        if not units:
+            return {}
+        out = subprocess.run(["systemctl", "show", "-p", "Id", "-p", "ActiveState", "-p", "NRestarts", *units],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    failed, restarts = parse_units(out)
+    return {"svc_failed": failed, "svc_restarts": restarts}
+
+
+class BrokerStatus:
+    """The local broker's link to the MCC and its backlog (store-and-forward nodes only)."""
+
+    def __init__(self, node: str):
+        import paho.mqtt.client as mqtt
+        self.state_topic = f"imm/bridge/{node}/state"
+        self.values = {}
+        c = mqtt.Client(client_id=f"imm-sysmon-{node}")
+        c.on_connect = lambda cl, u, f, rc: cl.subscribe(
+            [(self.state_topic, 0), ("$SYS/broker/store/messages/count", 0), ("$SYS/broker/retained messages/count", 0)])
+        c.on_message = self._on_message
+        c.connect_async("127.0.0.1", int(os.getenv("IMM_LOCAL_BROKER_PORT", "1883")), 30)
+        c.loop_start()
+        self.client = c
+
+    def _on_message(self, client, userdata, msg):
+        try:
+            self.values[msg.topic] = int(msg.payload.decode().strip())
+        except ValueError:
+            pass
+
+    def read(self) -> dict:
+        v = self.values
+        out = {}
+        if self.state_topic in v:
+            out["mcc_link"] = 1 if v[self.state_topic] == 1 else 0
+        stored = v.get("$SYS/broker/store/messages/count")
+        if stored is not None:
+            out["mqtt_backlog"] = max(0, stored - v.get("$SYS/broker/retained messages/count", 0))
+        return out
+
+
 def read_once(prev_cpu=None):
     now_cpu = cpu_times()
     payload = {"sensor": "sysmon", "timestamp": int(time.time())}
@@ -136,6 +208,7 @@ def read_once(prev_cpu=None):
     power, supply = parse_pmic(vcgencmd("pmic_read_adc"))
     values.update(power_w=power, supply_v=round(supply, 2) if supply else None)
     values.update(parse_throttled(vcgencmd("get_throttled")))
+    values.update(service_health())
     payload.update({k: v for k, v in values.items() if v is not None})
     return payload, now_cpu
 
@@ -146,10 +219,15 @@ def main():
     parser.add_argument("--interval", type=float, default=float(os.getenv("SYSMON_INTERVAL_S", "10")))
     args = parser.parse_args()
     publish_fn = make_publisher(args.mode, MQTT_TOPIC)
+    broker = None
+    if os.getenv("IMM_LOCAL_BROKER", "").lower() == "true" and args.mode != "stdout":
+        broker = BrokerStatus(os.getenv("IMM_NODE_ID") or os.uname().nodename)
     _, prev = read_once()
     time.sleep(1)
     while True:
         payload, prev = read_once(prev)
+        if broker is not None:
+            payload.update(broker.read())
         if len(payload) > 2:
             publish_fn(payload)
         else:

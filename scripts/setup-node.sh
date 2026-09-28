@@ -15,7 +15,13 @@
 #   MQTT_PASSWORD            (MQTT_EDGE_PASSWORD in imm-os-infra/.env)
 #
 # Steps: packages → interfaces (I2C, SPI, UART, 1-Wire) → user groups → Python venv →
-#        /etc/imm-os (edge.env, CA, calibration.yaml) → /etc/hosts → services → checks
+#        /etc/imm-os (edge.env, CA, calibration.yaml) → /etc/hosts → local broker →
+#        services → checks
+#
+# Store-and-forward: the node runs its own MQTT broker (localhost:1883). Every service
+# publishes there; a bridge forwards to the MCC over TLS and queues on disk while the
+# MCC or the network is down (tools/local_broker.py). --direct skips it (services then
+# connect straight to the MCC and an outage loses what RAM can't hold).
 #
 # Options:
 #   --node-id ID         this node's ID, shown on the dashboards (required)
@@ -31,6 +37,7 @@
 #   --eva "…"            eva/ daemons, e.g. "gps_driver uwb_driver position_fusion"
 #   --crew-id ID         wearer of this EVA kit (EVA nodes)
 #   --user USER          service user (default: the user who ran sudo)
+#   --direct             no local broker: services connect straight to the MCC
 #   --skip-apt           don't install packages
 #   --skip-interfaces    don't touch I2C/SPI/UART/1-Wire settings
 #   --no-services        configure only; don't start anything
@@ -46,7 +53,7 @@ HOSTS_FILE="${IMM_HOSTS_FILE:-/etc/hosts}"
 NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID="" SECRETS_FILE=""
 SENSORS="__unset__" ECLSS="__unset__" EVA="__unset__"
 SVC_USER="${SUDO_USER:-}"
-SKIP_APT=0 SKIP_IF=0 NO_SERVICES=0 CHECK_ONLY=0 DRY=0 NO_SYSMON=0
+SKIP_APT=0 SKIP_IF=0 NO_SERVICES=0 CHECK_ONLY=0 DRY=0 NO_SYSMON=0 DIRECT=0
 REBOOT_NEEDED=0
 
 die()  { echo "✗ $*" >&2; exit 1; }
@@ -69,12 +76,13 @@ while [ $# -gt 0 ]; do
         --crew-id) CREW_ID="$2"; shift 2 ;;
         --user) SVC_USER="$2"; shift 2 ;;
         --skip-apt) SKIP_APT=1; shift ;;
+        --direct) DIRECT=1; shift ;;
         --no-sysmon) NO_SYSMON=1; shift ;;
         --skip-interfaces) SKIP_IF=1; shift ;;
         --no-services) NO_SERVICES=1; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
         --dry-run) DRY=1; shift ;;
-        -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
 done
@@ -98,21 +106,26 @@ chk_time()   {   # right after boot the first NTP sync can take a little while
 }
 chk_name()   { getent hosts "$1" | awk '{print $1}' | head -1 | grep . || { echo "$1 does not resolve"; return 1; }; }
 chk_port()   { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null && echo "port $2 open" || { echo "cannot reach $1:$2"; return 1; }; }
-chk_mqtt() {
+mcc_get() { local v; v=$(envget "MCC_$1"); [ -n "$v" ] || v=$(envget "$2"); echo "$v"; }
+chk_mqtt() {   # logs in to the MCC broker directly (TLS), whatever the node's services use
     local host port user pass ca out
-    host=$(envget MQTT_HOST); port=$(envget MQTT_PORT); user=$(envget MQTT_USERNAME)
-    pass=$(envget MQTT_PASSWORD); ca=$(envget MQTT_TLS_CA)
+    host=$(mcc_get HOST MQTT_HOST); port=$(mcc_get MQTT_PORT MQTT_PORT); user=$(mcc_get MQTT_USERNAME MQTT_USERNAME)
+    pass=$(mcc_get MQTT_PASSWORD MQTT_PASSWORD); ca=$(mcc_get TLS_CA MQTT_TLS_CA)
     # read-only probe: retained lighting commands (exit 27 = timed out waiting, but connected)
     out=$(mosquitto_sub -h "$host" -p "$port" --cafile "$ca" -u "$user" -P "$pass" \
           -t 'habitat/control/lighting/#' -C 1 -W 5 2>&1) && { echo "TLS + login OK"; return 0; }
     case "$out" in
-        *"not authorised"*|*"Not authorized"*) echo "login refused: MQTT_PASSWORD wrong?"; return 1 ;;
+        *"not authorised"*|*"Not authorized"*) echo "login refused: MCC_MQTT_PASSWORD wrong?"; return 1 ;;
         *certificate*|*"host name"*|*TLS*|*SSL*|*"Protocol error"*)
-            echo "TLS handshake failed: is $ca the MCC's ca.crt, and MQTT_HOST ($host) a name in its certificate?"; return 1 ;;
+            echo "TLS handshake failed: is $ca the MCC's ca.crt, and MCC_HOST ($host) a name in its certificate?"; return 1 ;;
         *"Lookup error"*) echo "cannot resolve $host (hosts entry / --mcc-ip)"; return 1 ;;
         *[Tt]imed*|"") echo "TLS + login OK (no retained lighting yet)"; return 0 ;;
         *) echo "${out:0:120}"; return 1 ;;
     esac
+}
+chk_bridge() {   # the local broker's link to the MCC
+    systemctl is-active --quiet mosquitto || { echo "mosquitto (local broker) not running"; return 1; }
+    "$REPO/.venv/bin/python" "$REPO/tools/local_broker.py" status
 }
 chk_token() {
     local url secret body
@@ -146,13 +159,14 @@ chk_i2c() {
 
 run_checks() {
     step "Health checks"
-    local host; host=$(envget MQTT_HOST); host=${host:-$MCC_NAME}
+    local host; host=$(mcc_get HOST MQTT_HOST); host=${host:-$MCC_NAME}
     echo "  · board: ${MODEL:-unknown}"
     check "power supply" chk_power
     check "clock synchronised" chk_time
     check "$host resolves" chk_name "$host"
-    check "MQTT TLS port" chk_port "$host" "$(envget MQTT_PORT)"
+    check "MQTT TLS port" chk_port "$host" "$(mcc_get MQTT_PORT MQTT_PORT)"
     check "MQTT login" chk_mqtt
+    if [ "$(envget IMM_LOCAL_BROKER)" = true ]; then check "store-and-forward link" chk_bridge; fi
     check "Keycloak edge login" chk_token
     check "I2C devices" chk_i2c
     if command -v systemctl >/dev/null; then
@@ -192,6 +206,7 @@ fi
 secret_input() {   # secret_input VAR "prompt"
     local var="$1" current
     current=$(envget "$var")
+    [ -n "$current" ] || [ "$var" != MQTT_PASSWORD ] || current=$(envget MCC_MQTT_PASSWORD)
     if [ -n "${!var:-}" ]; then return; fi
     if [ -n "$current" ]; then printf -v "$var" '%s' "$current"; return; fi
     [ "$DRY" = 1 ] && { printf -v "$var" '%s' "<secret>"; return; }
@@ -226,6 +241,7 @@ if [ "$SKIP_APT" = 0 ]; then
     done
     run apt-get install -y -qq --no-install-recommends \
         python3-venv python3-dev python3-pip git curl openssl i2c-tools mosquitto-clients "${os_py[@]}"
+    if [ "$DIRECT" = 0 ]; then run apt-get install -y -qq --no-install-recommends mosquitto; fi
     ok "system packages installed"
 fi
 
@@ -283,7 +299,7 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 updates=(
     "IMM_NODE_ID=$NODE_ID" "IMM_ZONE=$ZONE"
-    "MQTT_HOST=$MCC_NAME" "MQTT_PORT=8883" "MQTT_USERNAME=imm-edge" "MQTT_TLS_CA=$CONF_DIR/mqtt-ca.crt"
+    "MCC_HOST=$MCC_NAME" "MCC_MQTT_PORT=8883" "MCC_MQTT_USERNAME=imm-edge" "MCC_TLS_CA=$CONF_DIR/mqtt-ca.crt"
     "KEYCLOAK_TOKEN_URL=http://$MCC_NAME/auth/realms/IndiaMoonMars/protocol/openid-connect/token"
     "IMM_EDGE_CLIENT_ID=imm-edge"
     "ECLSS_API_URL=http://$MCC_NAME/eclss" "EVA_API_URL=http://$MCC_NAME/eva"
@@ -298,14 +314,23 @@ fi
 [ "$ECLSS" = "__unset__" ] || updates+=("IMM_ECLSS_DAEMONS=$ECLSS")
 [ "$EVA" = "__unset__" ] || updates+=("IMM_EVA_DAEMONS=$EVA")
 [ -z "$CREW_ID" ] || updates+=("CREW_ID=$(echo "$CREW_ID" | tr '[:upper:]' '[:lower:]')")
+# where the node's own services publish: the local broker, or the MCC directly (--direct)
+if [ "$DIRECT" = 0 ]; then
+    updates+=("IMM_LOCAL_BROKER=true" "MQTT_HOST=localhost" "MQTT_PORT=1883" "MQTT_USERNAME=" "MQTT_TLS_CA=")
+    mqtt_secret="MQTT_PASSWORD="
+else
+    updates+=("IMM_LOCAL_BROKER=false" "MQTT_HOST=$MCC_NAME" "MQTT_PORT=8883" "MQTT_USERNAME=imm-edge"
+              "MQTT_TLS_CA=$CONF_DIR/mqtt-ca.crt")
+    mqtt_secret="MQTT_PASSWORD=$MQTT_PASSWORD"
+fi
 if [ "$DRY" = 1 ]; then
-    echo "  + set in $ENV_FILE: ${updates[*]} IMM_EDGE_CLIENT_SECRET=… MQTT_PASSWORD=…"
+    echo "  + set in $ENV_FILE: ${updates[*]} IMM_EDGE_CLIENT_SECRET=… MCC_MQTT_PASSWORD=…"
 else
     python3 "$REPO/tools/envfile.py" "$ENV_FILE" "${updates[@]}" \
-        "IMM_EDGE_CLIENT_SECRET=$IMM_EDGE_CLIENT_SECRET" "MQTT_PASSWORD=$MQTT_PASSWORD"
+        "IMM_EDGE_CLIENT_SECRET=$IMM_EDGE_CLIENT_SECRET" "MCC_MQTT_PASSWORD=$MQTT_PASSWORD" "$mqtt_secret"
     chmod 600 "$ENV_FILE"
 fi
-ok "edge.env: node $NODE_ID, zone $ZONE, MCC $MCC_NAME:8883"
+ok "edge.env: node $NODE_ID, zone $ZONE, MCC $MCC_NAME:8883$([ "$DIRECT" = 0 ] && echo ", services via the local broker")"
 
 if [ -n "$CA" ]; then
     run install -m 644 "$CA" "$CONF_DIR/mqtt-ca.crt"
@@ -344,13 +369,28 @@ if [ -n "$MCC_IP" ]; then
     done
 fi
 
-# ── 7. Services ───────────────────────────────────────────────────
+# ── 7. Local broker (store-and-forward) ───────────────────────────
+if [ "$DIRECT" = 0 ]; then
+    step "Local broker"
+    if [ "$DRY" = 1 ]; then
+        echo "  + tools/local_broker.py write (bridge to $MCC_NAME:8883), enable + restart mosquitto"
+    else
+        rc=0
+        python3 "$REPO/tools/local_broker.py" write --env-file "$ENV_FILE" || rc=$?
+        [ "$rc" = 0 ] || [ "$rc" = 3 ] || die "could not write the local broker config"
+        systemctl enable --quiet mosquitto
+        if [ "$rc" = 3 ] || ! systemctl is-active --quiet mosquitto; then systemctl restart mosquitto; fi
+        ok "mosquitto on localhost:1883, bridged to $MCC_NAME:8883 (queues on disk while the MCC is away)"
+    fi
+fi
+
+# ── 8. Services ───────────────────────────────────────────────────
 if [ "$NO_SERVICES" = 0 ]; then
     step "Services"
     run env IMM_HOME="$REPO" IMM_USER="$SVC_USER" IMM_PYTHON="$VENV/bin/python" "$REPO/systemd/deploy_services.sh"
 fi
 
-# ── 8. Checks ─────────────────────────────────────────────────────
+# ── 9. Checks ─────────────────────────────────────────────────────
 if [ "$DRY" = 1 ]; then
     echo; echo "Dry run: nothing was changed."
     exit 0
