@@ -111,6 +111,25 @@ board (CO₂, humidity, O₂), warm the BME280 with your hand, tilt and turn the
 gas from an unlit lighter (MQ-4). `--auto` skips the hands-on part. The IMM-OS Sensors tab
 shows the same automatic checks live under each node.
 
+## Wi-Fi (optional)
+
+The board can also send its readings over Wi-Fi. USB output continues, and the MQ-4 is on ADC1,
+which works with Wi-Fi on. Set it up once over USB. The network name and password are stored in
+the board's flash, never in code:
+
+```bash
+cd ~/imm-os-edge
+.venv/bin/python sensor_drivers/esp32_bridge.py --send "WIFI_SSID <network name>"
+.venv/bin/python sensor_drivers/esp32_bridge.py --send "WIFI_PASS <password>"
+.venv/bin/python sensor_drivers/esp32_bridge.py --send STATUS      # "wifi: connected ip=192.168.1.x"
+```
+
+Then `http://<board-ip>/` shows a live page, and `http://<board-ip>/json` serves the same line as USB.
+Give the board a DHCP reservation in the router, and point the Pi at it (from the MCC PC):
+`.\scripts\provision-pi.ps1 … -IntBoard http://<board-ip>/json`, or `ESP32_URL=` in `/etc/imm-os/edge.env`.
+Commands such as `CAL_CO2` still go over USB. `WIFI_OFF` forgets the network. Wi-Fi draws current
+peaks of about 300 mA: if `board.reset_reason` shows 9 (brownout), use a better 5 V supply or cable.
+
 ## Calibration
 
 Send these commands with `pio device monitor` on the PC, or from the Pi with

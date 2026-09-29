@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
-namespace sim { extern std::map<std::string, float> nvs; extern std::map<std::string, std::vector<uint8_t>> nvsb; }
+#include "Arduino.h"
+namespace sim { extern std::map<std::string, float> nvs; extern std::map<std::string, std::vector<uint8_t>> nvsb;
+                extern std::map<std::string, std::string> nvss; }
 class Preferences {
  public:
   bool begin(const char*, bool) { return true; }
@@ -25,6 +27,8 @@ class Preferences {
     sim::nvsb[k] = std::vector<uint8_t>((const uint8_t*)buf, (const uint8_t*)buf + n);
     return n;
   }
-  bool remove(const char* k) { return sim::nvs.erase(k) + sim::nvsb.erase(k) > 0; }
+  String getString(const char* k, const char* def) { auto it = sim::nvss.find(k); return it == sim::nvss.end() ? String(def) : String(it->second); }
+  size_t putString(const char* k, const char* v) { sim::nvss[k] = v; return strlen(v); }
+  bool remove(const char* k) { return sim::nvs.erase(k) + sim::nvsb.erase(k) + sim::nvss.erase(k) > 0; }
   void end() {}
 };

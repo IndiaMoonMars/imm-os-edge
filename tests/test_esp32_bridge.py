@@ -159,3 +159,36 @@ def test_board_health_and_o2_calibration_are_published():
     assert out["habitat/sensors/o2/zone1"]["calibrated"] == 0
     board = out["habitat/sensors/board/zone1"]
     assert board["reset_reason"] == 9 and board["boot_count"] == 7 and isinstance(board["i2c_err"], int)
+
+
+def test_wifi_polling_publishes_each_line_once(capsys):
+    import urllib.error
+    line = {"ms": 1000, "bme280": {"temp": 24.5, "hum": 41.2, "pres": 1008.4},
+            "board": {"uptime_s": 10, "reset_reason": 1, "boot_count": 2, "i2c_err": 0, "bme_resets": 0, "rssi_dbm": -61}}
+    replies = [line, line, urllib.error.URLError("timed out"), {**line, "ms": 2000}]
+
+    def fetch(url):
+        r = replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+    sent = []
+    esp32_bridge.run_http("http://esp/json", lambda p, t: sent.append((t, p)), now=lambda: 5.0, sleep=lambda s: None,
+                    fetch=fetch, max_loops=4)
+    assert [t for t, _ in sent].count("habitat/sensors/bme280/zone1") == 2      # the repeat isn't published
+    assert next(p for t, p in sent if t.startswith("habitat/sensors/board"))["rssi_dbm"] == -61
+    assert "not answering at http://esp/json" in capsys.readouterr().err
+
+
+def test_send_keeps_wifi_name_and_password_case():
+    class Ser:
+        def __init__(self): self.out = b""
+        def reset_input_buffer(self): pass
+        def write(self, b): self.out += b
+        def readline(self): return b""
+    s = Ser()
+    esp32_bridge.send(s, "wifi_pass My Pa$$ word", listen_s=0)
+    assert s.out == b"WIFI_PASS My Pa$$ word\n"
+    s = Ser()
+    esp32_bridge.send(s, "cal_o2", listen_s=0)
+    assert s.out == b"CAL_O2\n"

@@ -13,7 +13,7 @@ and each section is published on its own topic in the same shape as the Pi-wired
                                             grav_ms2, mag_ut, gyro_dps, temp, calib_gyro/acc/mag
     mq4     habitat/sensors/mq4/<zone>      vout_mv, rs_rl, rs_r0, ch4_ppm, warming, calibrated
                                             (rs_r0 once calibrated, ch4_ppm once also warm)
-    board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, bme_resets
+    board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, bme_resets, rssi_dbm
                                             (every 10 s: the MCC alarms on crashes, watchdog
                                             resets, brownouts and BME280 power losses)
 
@@ -23,10 +23,15 @@ temperatures differ (the SCD40 warms itself): a check that both humidity sensors
 
 Lines starting with '#' are the board's diagnostics (stderr as {"info": ...}).
 
-  --send CMD    send a command to the board and show its replies: STATUS, CAL_MQ4, CAL_O2,
+  --send CMD    send a command to the board over USB and show its replies: STATUS, CAL_MQ4, CAL_O2,
                 CAL_CO2 [ppm] (SCD40 forced recalibration in fresh air; self-calibration off),
-                ASC_ON, CAL_BNO_CLEAR. While the service runs, a reply can also land in its journal
+                ASC_ON, CAL_BNO_CLEAR, WIFI_SSID <name>, WIFI_PASS <password>, WIFI_OFF.
+                While the service runs, a reply can also land in its journal
                 (journalctl -u imm-sensor-pipeline@esp32_bridge.py).
+
+Over Wi-Fi: once the board has joined the network (WIFI_SSID / WIFI_PASS over USB; STATUS shows
+its IP), set ESP32_URL=http://<board-ip>/json and the bridge polls it once a second instead of
+reading USB. Commands (--send) still go over USB.
 Port: ESP32_PORT, else the first CP210x/CH340 USB-serial device. Modes: stdout | mqtt | both
 """
 import argparse
@@ -48,10 +53,10 @@ FIELDS = {
     "bno055": ("heading_deg", "roll_deg", "pitch_deg", "lin_acc_ms2", "imu_calib",
                "grav_ms2", "mag_ut", "gyro_dps", "temp", "calib_gyro", "calib_acc", "calib_mag", "cal_restored"),
     "mq4": ("vout_mv", "rs_rl", "rs_r0", "ch4_ppm", "warming", "calibrated", "warm_left_s"),
-    "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets"),
+    "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm"),
 }
 INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated", "warm_left_s", "cal_restored", "asc",
-              "uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets"}
+              "uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm"}
 DEW_POINT_SENSORS = ("bme280", "scd40")
 
 
@@ -118,6 +123,43 @@ def open_port(port: str):
     return ser
 
 
+def explain_mq4(value: dict, warned: set) -> None:
+    mq4 = value.get("mq4") if isinstance(value.get("mq4"), dict) else {}
+    state = "warming" if mq4.get("warming") else ("uncalibrated" if mq4 and not mq4.get("calibrated") else None)
+    if state and state not in warned:
+        warned.add(state)
+        msg = ("MQ-4 warming up (3 min): no ch4_ppm yet" if state == "warming" else
+               "MQ-4 not calibrated: send CAL_MQ4 in clean air (esp32_bridge.py --send CAL_MQ4)")
+        print(json.dumps({"info": msg}), file=sys.stderr, flush=True)
+
+
+def run_http(url, publish_fn, now=time.time, sleep=time.sleep, fetch=None, max_loops=None):
+    """Poll the board's /json over Wi-Fi once a second (the same line it prints on USB)."""
+    import urllib.error
+    from external_board_bridge import FETCH_ERRORS, Dedup, poll_http
+    import watchdog
+    fetch = fetch or poll_http
+    dedup, warned, failing, n = Dedup(), set(), 0, 0
+    while max_loops is None or n < max_loops:
+        n += 1
+        watchdog.kick()                 # alive while the board is away (reported, not restarted)
+        try:
+            line = fetch(url)
+            if failing:
+                print(json.dumps({"info": f"ESP32 board reachable again after {failing} failed poll(s)"}),
+                      file=sys.stderr, flush=True)
+            failing = 0
+            if isinstance(line, dict) and dedup.new(line):
+                for topic, payload in to_payloads(line, now()):
+                    publish_fn(payload, topic)
+                explain_mq4(line, warned)
+        except FETCH_ERRORS + (urllib.error.URLError,) as e:
+            failing += 1
+            if failing in (1, 10) or failing % 60 == 0:
+                print(json.dumps({"error": f"ESP32 board not answering at {url}: {e}"}), file=sys.stderr, flush=True)
+        sleep(1.0)
+
+
 def read_loop(ser, publish_fn, now=time.time):
     ser.reset_input_buffer()
     warned = set()
@@ -135,13 +177,7 @@ def read_loop(ser, publish_fn, now=time.time):
         if kind == "data":
             for topic, payload in to_payloads(value, now()):
                 publish_fn(payload, topic)
-            mq4 = value.get("mq4") if isinstance(value.get("mq4"), dict) else {}
-            state = "warming" if mq4.get("warming") else ("uncalibrated" if mq4 and not mq4.get("calibrated") else None)
-            if state and state not in warned:
-                warned.add(state)
-                msg = ("MQ-4 warming up (3 min): no ch4_ppm yet" if state == "warming" else
-                       "MQ-4 not calibrated: send CAL_MQ4 in clean air (esp32_bridge.py --send CAL_MQ4)")
-                print(json.dumps({"info": msg}), file=sys.stderr, flush=True)
+            explain_mq4(value, warned)
         elif kind == "info":
             print(json.dumps({"info": f"esp32: {value}"}), file=sys.stderr, flush=True)
         elif kind == "boot":
@@ -154,7 +190,8 @@ def read_loop(ser, publish_fn, now=time.time):
 
 def send(ser, command: str, listen_s: float = 13.0) -> int:
     ser.reset_input_buffer()
-    ser.write(command.strip().upper().encode() + b"\n")
+    word, _, rest = command.strip().partition(" ")
+    ser.write((word.upper() + (" " + rest if rest else "")).encode() + b"\n")   # Wi-Fi name / password keep their case
     deadline = time.monotonic() + listen_s
     got = False
     while time.monotonic() < deadline:
@@ -168,8 +205,14 @@ def send(ser, command: str, listen_s: float = 13.0) -> int:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=MODES, default="stdout")
-    parser.add_argument("--send", metavar="CMD", help="STATUS, CAL_MQ4, CAL_O2, CAL_CO2 [ppm], ASC_ON, CAL_BNO_CLEAR")
+    parser.add_argument("--send", metavar="CMD",
+                        help="STATUS, CAL_MQ4, CAL_O2, CAL_CO2 [ppm], ASC_ON, CAL_BNO_CLEAR, WIFI_SSID <name>, WIFI_PASS <pw>, WIFI_OFF")
     args = parser.parse_args()
+    url = os.getenv("ESP32_URL", "").strip()
+    if url and not args.send:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        run_http(url, make_publisher(args.mode, "habitat/sensors/esp32/zone1"))
+        return
     port = esp32_port()
     if not port:
         print(json.dumps({"error": "no ESP32 found on USB (plug the board into the Pi; or set ESP32_PORT)"}),

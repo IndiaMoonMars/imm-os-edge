@@ -43,3 +43,11 @@ class HardwareSerial {
   void println(const char* s) { sim::tx += s; sim::tx += "\n"; }
 };
 extern HardwareSerial Serial;
+
+class String {
+  std::string s_;
+ public:
+  String(const char* s = "") : s_(s) {}
+  String(const std::string& s) : s_(s) {}
+  const char* c_str() const { return s_.c_str(); }
+};

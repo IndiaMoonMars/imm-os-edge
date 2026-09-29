@@ -38,6 +38,9 @@ param(
     # its address over Wi-Fi (e.g. http://192.168.1.77/), or 'find' to search the Pi's network.
     # Adds external_board_bridge.py to the sensors already running.
     [string]$ExtBoard = '',
+    # Internal ESP32 sensor board: 'usb' (default) or its Wi-Fi address once it joined the network
+    # (e.g. http://192.168.1.140/json; its STATUS over USB shows the IP). Adds esp32_bridge.py.
+    [string]$IntBoard = '',
     # This PC's LAN address; found automatically when empty
     [string]$MccIp = '',
     [string]$InfraDir = '',
@@ -206,6 +209,7 @@ $setup = 'cd ~/imm-os-edge && sudo ./scripts/setup-node.sh --secrets-file ~/.imm
     " --node-id $NodeId --zone $Zone --mcc-ip $MccIp --ca ~/mqtt-ca.crt"
 if ($Sensors) { $setup += " --sensors '$Sensors'" }
 if ($ExtBoard) { $setup += " --ext-board '$ExtBoard'" }
+if ($IntBoard) { $setup += " --int-board '$IntBoard'" }
 if ($DryRun) { $setup += ' --dry-run' }
 & ssh -t @SshOpts $Target $setup
 $rc = $LASTEXITCODE

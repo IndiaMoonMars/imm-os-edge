@@ -2,8 +2,12 @@
 //
 // Reads the board's sensors and sends one JSON line per second over USB serial
 // (115200 baud) to the Raspberry Pi, where sensor_drivers/esp32_bridge.py publishes
-// each sensor to IMM-OS. The Pi handles TLS, login and the offline blackbox, so this
-// board needs no Wi-Fi.
+// each sensor to IMM-OS. The Pi handles TLS, login and the offline blackbox.
+//
+// Wi-Fi (optional): after WIFI_SSID / WIFI_PASS over USB (stored in flash, never in code)
+// the board also serves the same line at http://<board-ip>/json and a live page at
+// http://<board-ip>/, so the Pi can read it over Wi-Fi (ESP32_URL) instead of USB. USB output
+// continues either way; the MQ-4 is on ADC1, which works with Wi-Fi on.
 //
 //   I2C (GPIO21 SDA, GPIO22 SCL, 3.3 V): BME280 (0x76/0x77), SCD40 (0x62),
 //                                         BNO055 (0x28/0x29), DFRobot SEN0322 O2 (0x70-0x73)
@@ -49,8 +53,13 @@
 //                  and automatic self-calibration off (stored in the sensor)
 //   ASC_ON         automatic self-calibration back on (after the mission)
 //   CAL_BNO_CLEAR  forget the stored BNO055 calibration
+//   WIFI_SSID <network name>   (the rest of the line: spaces allowed; case kept)
+//   WIFI_PASS <password>       then it connects; WIFI_PASS alone for an open network
+//   WIFI_OFF                   forget the Wi-Fi network
 #include <Arduino.h>
 #include <Preferences.h>
+#include <WebServer.h>
+#include <WiFi.h>
 #include <Wire.h>
 #include <esp_idf_version.h>
 #include <esp_system.h>
@@ -475,7 +484,7 @@ static Mq4Reading mq4Read() {
 // ── Main loop ────────────────────────────────────────────────────────
 static uint32_t lastSample = 0, lastProbe = 0, lastBoard = 0;
 static int bmeFails = 0, scdZeroes = 0;
-static char cmd[32];
+static char cmd[112];
 static int cmdLen = 0;
 
 static void status() {
@@ -551,10 +560,58 @@ static void watchdogStart() {
   esp_task_wdt_add(NULL);                                       // this task (setup/loop) must check in
 }
 
+// ── Wi-Fi + page ─────────────────────────────────────────────────────
+Preferences wifiPrefs;                                          // "imm-wifi": network name and password
+WebServer web(80);
+static char wifiSsid[33] = "", wifiPass[65] = "";
+static char lastLine[1024] = "{}";
+
+static const char PAGE[] =
+    "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+    "<title>IMM-OS sensor board</title><style>body{font-family:sans-serif;background:#0b1224;color:#e6ecff;margin:16px}"
+    "h1{font-size:18px}.v{font-size:26px;font-weight:700}.c{display:inline-block;margin:8px 18px 8px 0;vertical-align:top}"
+    "small{color:#8f9bb8}</style></head><body><h1>IMM-OS sensor board</h1><div id=d>…</div><script>"
+    "const c=(l,v,u,s)=>`<div class=c><small>${l}</small><div class=v>${v?\?'–'} ${u}</div><small>${s||''}</small></div>`;"
+    "async function t(){try{const j=await(await fetch('/json')).json(),b=j.bme280||{},s=j.scd40||{},o=j.o2||{},m=j.mq4||{},n=j.bno055||{};"
+    "document.getElementById('d').innerHTML=c('Temperature',b.temp,'°C',`${b.hum?\?'–'} %RH · ${b.pres?\?'–'} hPa`)"
+    "+c('CO₂',s.co2_ppm,'ppm',s.asc===0?'self-calibration off':'')+c('O₂',o.o2_pct,'%',o.calibrated?'calibrated':'not calibrated')"
+    "+c('Methane',m.warming?'warming':m.ch4_ppm,m.warming?'':'ppm',m.warming?`${m.warm_left_s?\?''} s left`:'')"
+    "+c('Heading',n.heading_deg,'°',`calibration ${n.imu_calib?\?'–'}/3`)}catch(e){}}"
+    "t();setInterval(t,1000)</script></body></html>";
+
+static void wifiStart() {
+  if (!wifiSsid[0]) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.setHostname("imm-sensors");
+  WiFi.begin(wifiSsid, wifiPass);
+}
+
 static void handleCommand() {
   cmd[cmdLen] = 0;
+  for (char* p = cmd; *p && *p != ' '; p++) *p = (char)toupper(*p);   // the command word is case-insensitive;
+                                                                       // Wi-Fi name and password keep their case
   if (strcmp(cmd, "STATUS") == 0) {
     status();
+    char b[120];
+    snprintf(b, sizeof b, "wifi: %s ip=%s", wifiSsid[0] ? (WiFi.status() == WL_CONNECTED ? "connected" : "connecting") : "off",
+             WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "-");
+    diag(b);
+  } else if (strncmp(cmd, "WIFI_SSID ", 10) == 0) {                  // rest of the line: spaces allowed
+    snprintf(wifiSsid, sizeof wifiSsid, "%s", cmd + 10);
+    wifiPrefs.putString("ssid", wifiSsid);
+    diag("wifi: network name stored; now send WIFI_PASS <password> (WIFI_PASS alone for an open network)");
+  } else if (strncmp(cmd, "WIFI_PASS", 9) == 0 && (cmd[9] == ' ' || cmd[9] == 0)) {
+    snprintf(wifiPass, sizeof wifiPass, "%s", cmd[9] ? cmd + 10 : "");
+    wifiPrefs.putString("pass", wifiPass);
+    if (!wifiSsid[0]) diag("wifi: password stored; send WIFI_SSID <network name>");
+    else { diag("wifi: stored, connecting (STATUS shows the IP)"); wifiStart(); }
+  } else if (strcmp(cmd, "WIFI_OFF") == 0) {
+    wifiSsid[0] = wifiPass[0] = 0;
+    wifiPrefs.putString("ssid", "");
+    wifiPrefs.putString("pass", "");
+    WiFi.disconnect(true);
+    diag("wifi: network forgotten; USB only");
   } else if (strcmp(cmd, "CAL_MQ4") == 0) {
     if (millis() < mq4WarmupMs) diag("CAL_MQ4: still warming up; try again after 3 min");
     else { mq4CalLeft = MQ4_CAL_SAMPLES; mq4CalSum = 0; diag("CAL_MQ4: sampling clean air for 10 s"); }
@@ -571,7 +628,7 @@ static void handleCommand() {
     bnoCalRestored = bnoCalSaved = false;
     diag("CAL_BNO_CLEAR: stored BNO055 calibration forgotten");
   } else if (cmdLen) {
-    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, CAL_BNO_CLEAR)");
+    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, CAL_BNO_CLEAR, WIFI_SSID, WIFI_PASS, WIFI_OFF)");
   }
   cmdLen = 0;
 }
@@ -592,6 +649,9 @@ void setup() {
   prefs.begin("imm-mq4", false);
   mq4R0 = prefs.isKey("r0") ? prefs.getFloat("r0", 0) : 0;   // isKey: no "NOT_FOUND" error log before CAL_MQ4
   bnoPrefs.begin("imm-bno", false);
+  wifiPrefs.begin("imm-wifi", false);
+  snprintf(wifiSsid, sizeof wifiSsid, "%s", wifiPrefs.getString("ssid", "").c_str());
+  snprintf(wifiPass, sizeof wifiPass, "%s", wifiPrefs.getString("pass", "").c_str());
   // EN button (2), software (3), crash (4), watchdogs (5-7), deep sleep (8): the ESP32 restarted
   // but the MQ-4 heater kept its 5 V, so it is still hot. Power-on (1), brownout (9), unknown: warm up.
   mq4WarmupMs = resetReason >= 2 && resetReason <= 8 ? 0 : MQ4_WARMUP_MS;
@@ -600,16 +660,22 @@ void setup() {
   diag(mq4WarmupMs ? "mq4: heater warming up for 3 min" : "mq4: heater stayed powered through this reset: no warm-up");
   findSensors();
   status();
+  wifiStart();
+  if (wifiSsid[0]) diag("wifi: connecting (STATUS shows the IP)");
+  web.on("/", [] { web.send(200, "text/html", PAGE); });
+  web.on("/json", [] { web.sendHeader("Access-Control-Allow-Origin", "*"); web.send(200, "application/json", lastLine); });
+  web.begin();
   lastProbe = millis();
   watchdogStart();
 }
 
 void loop() {
   esp_task_wdt_reset();
+  web.handleClient();
   while (Serial.available()) {
     const int c = Serial.read();
     if (c == '\n' || c == '\r') handleCommand();
-    else if (cmdLen < (int)sizeof(cmd) - 1) cmd[cmdLen++] = (char)toupper(c);
+    else if (cmdLen < (int)sizeof(cmd) - 1) cmd[cmdLen++] = (char)c;
   }
 
   const uint32_t now = millis();
@@ -689,9 +755,12 @@ void loop() {
   if (now - lastBoard >= BOARD_MS || lastBoard == 0) {
     lastBoard = now;
     n += snprintf(line + n, sizeof line - n,
-                  ",\"board\":{\"uptime_s\":%lu,\"reset_reason\":%d,\"boot_count\":%lu,\"i2c_err\":%lu,\"bme_resets\":%d}",
+                  ",\"board\":{\"uptime_s\":%lu,\"reset_reason\":%d,\"boot_count\":%lu,\"i2c_err\":%lu,\"bme_resets\":%d",
                   (unsigned long)(now / 1000), resetReason, (unsigned long)bootCount, (unsigned long)i2cErr, bmeResets);
+    if (WiFi.status() == WL_CONNECTED) n += snprintf(line + n, sizeof line - n, ",\"rssi_dbm\":%d", (int)WiFi.RSSI());
+    n += snprintf(line + n, sizeof line - n, "}");
   }
   snprintf(line + n, sizeof line - n, "}");
   Serial.println(line);
+  snprintf(lastLine, sizeof lastLine, "%s", line);
 }

@@ -36,6 +36,8 @@
 #   --eclss "…"          eclss/ daemons, e.g. "water_monitor eclss_pid"
 #   --eva "…"            eva/ daemons, e.g. "gps_driver uwb_driver position_fusion"
 #   --crew-id ID         wearer of this EVA kit (EVA nodes)
+#   --int-board WHERE    the internal ESP32 sensor board, and adds esp32_bridge.py: usb (default),
+#                        or http://<board-ip>/json once it is on Wi-Fi (WIFI_SSID / WIFI_PASS)
 #   --ext-board WHERE    the external GNSS + Geiger board, and adds external_board_bridge.py:
 #                        usb (on a Pi USB port; found by what it prints), /dev/serial/by-id/…,
 #                        http://<board-ip>/ (over Wi-Fi), or find (search the local network)
@@ -53,7 +55,7 @@ CONF_DIR="${IMM_CONF_DIR:-/etc/imm-os}"
 ENV_FILE="$CONF_DIR/edge.env"
 HOSTS_FILE="${IMM_HOSTS_FILE:-/etc/hosts}"
 
-NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID="" SECRETS_FILE="" EXT_BOARD=""
+NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID="" SECRETS_FILE="" EXT_BOARD="" INT_BOARD=""
 SENSORS="__unset__" ECLSS="__unset__" EVA="__unset__"
 SVC_USER="${SUDO_USER:-}"
 SKIP_APT=0 SKIP_IF=0 NO_SERVICES=0 CHECK_ONLY=0 DRY=0 NO_SYSMON=0 DIRECT=0
@@ -78,6 +80,7 @@ while [ $# -gt 0 ]; do
         --eva) EVA="$2"; shift 2 ;;
         --crew-id) CREW_ID="$2"; shift 2 ;;
         --ext-board) EXT_BOARD="$2"; shift 2 ;;
+        --int-board) INT_BOARD="$2"; shift 2 ;;
         --user) SVC_USER="$2"; shift 2 ;;
         --skip-apt) SKIP_APT=1; shift ;;
         --direct) DIRECT=1; shift ;;
@@ -86,7 +89,7 @@ while [ $# -gt 0 ]; do
         --no-services) NO_SERVICES=1; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
         --dry-run) DRY=1; shift ;;
-        -h|--help) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
 done
@@ -313,6 +316,19 @@ updates=(
 if [ "$NO_SYSMON" = 0 ]; then
     [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
     case " $SENSORS " in *" sysmon_driver.py "*) ;; *) SENSORS=$(echo "sysmon_driver.py $SENSORS" | xargs) ;; esac
+fi
+if [ -n "$INT_BOARD" ]; then
+    case "$INT_BOARD" in
+        usb) updates+=("ESP32_URL=") ; ok "internal sensor board: USB" ;;
+        http://*|https://*)
+            case "$INT_BOARD" in */json) ;; *) INT_BOARD="${INT_BOARD%/}/json" ;; esac
+            if curl -fsS -m 5 "$INT_BOARD" 2>/dev/null | grep -q '"ms"'; then ok "internal sensor board answers at $INT_BOARD"
+            else warn "the internal sensor board did not answer at $INT_BOARD now (is it on Wi-Fi? STATUS over USB shows its IP)"; fi
+            updates+=("ESP32_URL=$INT_BOARD") ;;
+        *) die "--int-board: usb or http://<board-ip>/json" ;;
+    esac
+    [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
+    case " $SENSORS " in *" esp32_bridge.py "*) ;; *) SENSORS=$(echo "$SENSORS esp32_bridge.py" | xargs) ;; esac
 fi
 if [ -n "$EXT_BOARD" ]; then
     PYBIN="$REPO/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN=python3

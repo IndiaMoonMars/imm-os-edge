@@ -328,7 +328,9 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
         print(f"\n{name}: fix the bus problem above first.")
         return 1
 
-    if sensor.usb:
+    if sensor.usb and os.getenv("ESP32_URL"):
+        r.ok(f"ESP32 sensor board over Wi-Fi at {os.getenv('ESP32_URL')}")
+    elif sensor.usb:
         port = esp32_port()
         if not port:
             r.fail("no ESP32 on USB: plug the board into a Pi USB port with a data cable (or set ESP32_PORT)")
@@ -452,7 +454,7 @@ def stm32_answers(port: str, wait_s: float = 2.5) -> bool:
 def connected(sensor: Sensor, found_i2c, uart_present: bool) -> bool:
     """Is this sensor's hardware visible? (Doesn't prove it works; bringup() does that.)"""
     if sensor.usb:
-        return bool(esp32_port())
+        return bool(os.getenv("ESP32_URL") or esp32_port())
     if sensor.net:
         return bool(os.getenv("EXT_BOARD_URL") or os.getenv("EXT_BOARD_PORT"))
     if sensor.uart:

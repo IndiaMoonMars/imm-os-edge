@@ -271,3 +271,32 @@ def test_scd40_forced_recalibration_turns_self_calibration_off(sim, tmp_path):
     _, notes = sim(BASE + "run 185\nsend CAL_CO2\nrun 2\nsend ASC_ON\nrun 6\nscdstate\n", tmp_path)
     assert "# ASC_ON: SCD40 automatic self-calibration on" in notes
     assert "SCD asc=1 persisted=1 frc=420 running=1" in notes
+
+
+
+# ── Wi-Fi ───────────────────────────────────────────────────────────
+
+def test_wifi_from_usb_commands_serves_json_and_page(sim, tmp_path):
+    data, notes = sim(BASE + "run 1\nwifi\nsend wifi_ssid Habitat Net 2\nsend WIFI_PASS pA$$ w0rd\nrun 1\nwifi\n"
+                      "send status\nrun 11\nhttp /json\nhttp /\n", tmp_path)
+    assert "WIFI [] [] 0" in notes                                    # USB only until told otherwise
+    assert "WIFI [Habitat Net 2] [pA$$ w0rd] 1" in notes              # name with spaces, password case kept
+    assert "# wifi: connected ip=192.168.1.77" in notes
+    j = next(n for n in notes if n.startswith("HTTP 200 application/json"))
+    served = json.loads(j.split(" ", 3)[3])
+    assert served == data[-1]                                         # the same line as on USB
+    assert "bme280" in served
+    assert [d["board"].get("rssi_dbm") for d in data if "board" in d][-1] == -58   # Wi-Fi signal in board health
+    assert any(n.startswith("HTTP 200 text/html") and "IMM-OS sensor board" in n for n in notes)
+
+
+def test_wifi_remembered_across_restart_and_forgotten(sim, tmp_path):
+    _, notes = sim(BASE + "run 1\nsend WIFI_SSID Hab\nsend WIFI_PASS secret\nrun 1\nresetreason 6\nreset\nrun 1\nwifi\n"
+                   "send WIFI_OFF\nrun 1\nwifi\n", tmp_path)
+    assert "WIFI [Hab] [secret] 1" in notes and "# wifi: connecting (STATUS shows the IP)" in notes
+    assert "# wifi: network forgotten; USB only" in notes and notes[-1].startswith("WIFI") and notes[-1].endswith(" 0")
+
+
+def test_commands_still_case_insensitive(sim, tmp_path):
+    _, notes = sim(BASE + "run 1\nsend cal_o2\nrun 1\n", tmp_path)
+    assert "# CAL_O2: SEN0322 set to 20.9 % (fresh air)" in notes
