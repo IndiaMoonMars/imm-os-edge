@@ -225,12 +225,25 @@ static const char PAGE[] =
     "<small>${n.sats?\?0} satellites · alt ${n.alt_m?\?'–'} m · ${n.utc?\?''}</small></div>`}catch(e){}}"
     "t();setInterval(t,1000)</script></body></html>";
 
+// The web server can only start once Wi-Fi has brought the network stack (lwIP) up: starting it
+// earlier makes the ESP32 abort ("tcpip_api_call: Invalid mbox") and reboot, over and over.
+static bool webStarted = false;
+
+static void webStart() {
+  if (webStarted) return;
+  web.on("/", [] { web.send(200, "text/html", PAGE); });
+  web.on("/json", [] { web.sendHeader("Access-Control-Allow-Origin", "*"); web.send(200, "application/json", lastLine); });
+  web.begin();
+  webStarted = true;
+}
+
 static void wifiStart() {
   if (!wifiSsid[0]) return;
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setHostname("imm-external");
   WiFi.begin(wifiSsid, wifiPass);
+  webStart();
 }
 
 static void handleCommand(char* cmd) {
@@ -284,16 +297,13 @@ void setup() {
   diag("IMM-OS external board started (GNSS + Geiger)");
   if (!gnssInit()) diag("gnss: no TEL0157 at 0x20 (check SDA 21 / SCL 22 and its power)");
   wifiStart();
-  web.on("/", [] { web.send(200, "text/html", PAGE); });
-  web.on("/json", [] { web.sendHeader("Access-Control-Allow-Origin", "*"); web.send(200, "application/json", lastLine); });
-  web.begin();
   lastProbe = lastSample = millis();
   watchdogStart();
 }
 
 void loop() {
   esp_task_wdt_reset();
-  web.handleClient();
+  if (webStarted) web.handleClient();
   while (Serial.available()) {
     const int c = Serial.read();
     if (c == '\n' || c == '\r') { cmd[cmdLen] = 0; handleCommand(cmd); cmdLen = 0; }

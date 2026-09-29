@@ -44,7 +44,7 @@ std::map<std::string, float> nvs;
 std::map<std::string, std::vector<uint8_t>> nvsb;
 std::map<std::string, std::string> nvss;
 std::string wifi_ssid, wifi_pass;
-bool wifi_up = false;
+bool wifi_up = false, wifi_stack = false;
 std::map<uint8_t, I2CDevice*> bus;
 }
 HardwareSerial Serial;

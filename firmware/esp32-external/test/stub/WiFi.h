@@ -3,11 +3,11 @@
 #include "Arduino.h"
 #define WIFI_STA 1
 #define WL_CONNECTED 3
-namespace sim { extern std::string wifi_ssid, wifi_pass; extern bool wifi_up; }
+namespace sim { extern std::string wifi_ssid, wifi_pass; extern bool wifi_up, wifi_stack; }
 struct IPAddress { String toString() const { return String("192.168.1.77"); } };
 class WiFiClass {
  public:
-  void mode(int) {}
+  void mode(int) { sim::wifi_stack = true; }                       // brings the network stack up
   void setAutoReconnect(bool) {}
   void setHostname(const char*) {}
   void begin(const char* s, const char* p) { sim::wifi_ssid = s; sim::wifi_pass = p; sim::wifi_up = true; }

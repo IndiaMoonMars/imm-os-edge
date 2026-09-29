@@ -22,7 +22,7 @@
 namespace sim {
 uint32_t now_ms = 0; uint64_t now_us = 0;
 std::string rx, tx, wifi_ssid, wifi_pass;
-bool wifi_up = false;
+bool wifi_up = false, wifi_stack = false;
 int reset_reason = 1, sda_stuck_clocks = 0, scl_pulses = 0, wire_restarts = 0;
 uint32_t wdt_timeout_s = 0, wdt_last_feed = 0, wdt_max_gap = 0;
 bool wdt_added = false;

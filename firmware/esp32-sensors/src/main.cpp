@@ -579,12 +579,25 @@ static const char PAGE[] =
     "+c('Heading',n.heading_deg,'°',`calibration ${n.imu_calib?\?'–'}/3`)}catch(e){}}"
     "t();setInterval(t,1000)</script></body></html>";
 
+// The web server can only start once Wi-Fi has brought the network stack (lwIP) up: starting it
+// earlier makes the ESP32 abort ("tcpip_api_call: Invalid mbox") and reboot, over and over.
+static bool webStarted = false;
+
+static void webStart() {
+  if (webStarted) return;
+  web.on("/", [] { web.send(200, "text/html", PAGE); });
+  web.on("/json", [] { web.sendHeader("Access-Control-Allow-Origin", "*"); web.send(200, "application/json", lastLine); });
+  web.begin();
+  webStarted = true;
+}
+
 static void wifiStart() {
   if (!wifiSsid[0]) return;
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setHostname("imm-sensors");
   WiFi.begin(wifiSsid, wifiPass);
+  webStart();
 }
 
 static void handleCommand() {
@@ -662,16 +675,13 @@ void setup() {
   status();
   wifiStart();
   if (wifiSsid[0]) diag("wifi: connecting (STATUS shows the IP)");
-  web.on("/", [] { web.send(200, "text/html", PAGE); });
-  web.on("/json", [] { web.sendHeader("Access-Control-Allow-Origin", "*"); web.send(200, "application/json", lastLine); });
-  web.begin();
   lastProbe = millis();
   watchdogStart();
 }
 
 void loop() {
   esp_task_wdt_reset();
-  web.handleClient();
+  if (webStarted) web.handleClient();
   while (Serial.available()) {
     const int c = Serial.read();
     if (c == '\n' || c == '\r') handleCommand();

@@ -192,3 +192,21 @@ def test_send_keeps_wifi_name_and_password_case():
     s = Ser()
     esp32_bridge.send(s, "cal_o2", listen_s=0)
     assert s.out == b"CAL_O2\n"
+
+
+def test_send_keeps_listening_through_a_board_reset(capsys):
+    class SerialException(OSError):                # pyserial's, without needing pyserial here
+        pass
+
+    class Ser:
+        def __init__(self): self.n = 0
+        def reset_input_buffer(self): pass
+        def write(self, b): pass
+        def readline(self):
+            self.n += 1
+            if self.n == 1:
+                raise SerialException("device reports readiness to read but returned no data")
+            return b"# wifi: stored, connecting (STATUS shows the IP)\n" if self.n == 2 else b""
+    assert esp32_bridge.send(Ser(), "WIFI_PASS x", listen_s=0.5) == 0
+    out = capsys.readouterr().out
+    assert "still listening" in out and "wifi: stored, connecting" in out

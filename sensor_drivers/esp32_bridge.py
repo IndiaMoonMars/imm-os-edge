@@ -195,7 +195,13 @@ def send(ser, command: str, listen_s: float = 13.0) -> int:
     deadline = time.monotonic() + listen_s
     got = False
     while time.monotonic() < deadline:
-        parsed = parse_line(ser.readline().decode("utf-8", "replace"))
+        try:
+            raw = ser.readline()
+        except Exception as e:                   # the board reset, or another program read the same bytes
+            print(f"  (USB read interrupted: {e}; still listening)")
+            time.sleep(0.3)
+            continue
+        parsed = parse_line(raw.decode("utf-8", "replace"))
         if parsed and parsed[0] == "info":
             print("  esp32:", parsed[1])
             got = True
@@ -224,6 +230,17 @@ def main():
         print(json.dumps({"error": f"USB serial {port}: {e}"}), file=sys.stderr)
         sys.exit(1)
     if args.send:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from external_board_bridge import port_users
+            others = port_users(port)
+        except Exception:
+            others = []
+        if others:
+            print("  note: another program has this port open, so some replies may go to it (its journal):")
+            for o in others:
+                print("   ", o)
+            print("  for clean replies: sudo systemctl stop imm-sensor-pipeline@esp32_bridge.py  (start it again after)")
         sys.exit(send(ser, args.send))
     read_loop(ser, make_publisher(args.mode, "habitat/sensors/esp32/zone1"))
 
