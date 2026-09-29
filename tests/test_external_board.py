@@ -269,11 +269,13 @@ def test_listen_reset_shows_link_works_but_sketch_is_silent():
                 self.pins.append((k, v))
                 if k == "rts" and v is False and ("rts", True) in self.pins:     # EN released: ROM banner
                     self.lines += [b"ets Jun  8 2016 00:22:57\r\n", b"rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\r\n",
-                                   b"entry 0x400805e4\r\n", b"WiFi connected\r\n"]
+                                   b"entry 0x400805e4\r\n", b"# connected  ->  http://192.168.1.139\r\n"]
             object.__setattr__(self, k, v)
     ser = Resettable()
     lines = []
+    probed = []
     baud, _ = eb.listen("/dev/ttyUSB1", seconds=0.2, out=lines.append, users=lambda p: [],
-                        opener=lambda p, b: ser, reset=True)
+                        opener=lambda p, b: ser, reset=True, probe_fn=lambda u, out: probed.append(u) or u)
+    assert probed == ["http://192.168.1.139"]
     assert baud == 0 and ("rts", True) in ser.pins and ser.pins[-1] == ("rts", False)
     assert any("USB link works" in ln for ln in lines)

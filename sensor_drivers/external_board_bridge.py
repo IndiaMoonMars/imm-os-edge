@@ -458,10 +458,12 @@ def reset_board(ser, sleep=time.sleep):
     ser.rts = False
 
 
-def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_users, reset=False) -> tuple:
+def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_users, reset=False,
+           probe_fn=None) -> tuple:
     """Read a USB serial port at the usual speeds and show what the board prints.
     Returns (baud, reading) for the speed whose output has GNSS/Geiger values, else (0, None)."""
     opener = opener or (lambda p, b: open_serial(p, b, exclusive=True))
+    probe_fn = probe_fn or probe
     held = users(port)
     if held:
         out(f"  ✗ {port} is already open in another program, which takes what the board prints:")
@@ -520,7 +522,12 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
         if reset and baud == 115200 and any("rst:0x" in ln or "boot:0x" in ln for ln in lines) \
                 and not (best and score(best)):
             out("  · the USB link works (the ESP32 start-up message came through), but after it the sketch "
-                "prints no readings on USB. Read the board over Wi-Fi instead (--find / --probe http://<ip>/)")
+                "prints no readings on USB")
+            for url in dict.fromkeys(re.findall(r"https?://\d+\.\d+\.\d+\.\d+(?::\d+)?[^\s\"']*", " ".join(lines))):
+                out(f"  · the board says it serves {url}: reading it over Wi-Fi")
+                if probe_fn(url, out=out):
+                    return 0, None
+            out("  · read the board over Wi-Fi instead (--find / --probe http://<board-ip>/)")
             return 0, None
         if any('"bme280"' in ln or '"scd40"' in ln or '"bno055"' in ln for ln in lines):
             out("  · this is the INTERNAL sensor board (BME280/SCD40/…), not the external one")
@@ -636,7 +643,7 @@ def find(hosts=None, get=get_text, out=print, port_open=None) -> list:
     """Look for a web server on the local networks whose data has GNSS or Geiger values."""
     def is_open(h):
         try:
-            with socket.create_connection((h, 80), timeout=0.4):
+            with socket.create_connection((h, 80), timeout=1.5):   # ESP32 Wi-Fi power save answers slowly
                 return True
         except OSError:
             return False

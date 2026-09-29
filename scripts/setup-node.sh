@@ -321,12 +321,17 @@ if [ -n "$EXT_BOARD" ]; then
         usb|/dev/*)      # on a Pi USB port: find which port, and its speed, from what it prints
             echo "  · listening to the USB serial ports for the external board …"
             ARG=""; [ "$EXT_BOARD" = usb ] || ARG="$EXT_BOARD"
-            found=$("$PYBIN" "$BRIDGE" --listen $ARG 2>&1 | tee /dev/stderr \
-                    | sed -n 's/.*EXT_BOARD_PORT=\([^ ]*\) EXT_BOARD_BAUD=\([0-9]*\).*/\1 \2/p' | head -1 || true)
-            [ -n "$found" ] || die "external board not recognised on USB (see its output above)"
-            updates+=("EXT_BOARD_PORT=${found% *}" "EXT_BOARD_BAUD=${found#* }" "EXT_BOARD_URL=")
-            ok "external board on ${found% *} at ${found#* } baud"
-            EXT_BOARD="" ;;
+            heard=$("$PYBIN" "$BRIDGE" --listen $ARG --reset 2>&1 | tee /dev/stderr || true)
+            found=$(echo "$heard" | sed -n 's/.*EXT_BOARD_PORT=\([^ ]*\) EXT_BOARD_BAUD=\([0-9]*\).*/\1 \2/p' | head -1)
+            EXT_BOARD=$(echo "$heard" | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1)
+            if [ -n "$found" ]; then
+                updates+=("EXT_BOARD_PORT=${found% *}" "EXT_BOARD_BAUD=${found#* }" "EXT_BOARD_URL=")
+                ok "external board on ${found% *} at ${found#* } baud"
+            elif [ -n "$EXT_BOARD" ]; then
+                ok "external board: its sketch prints no readings on USB, but serves them at $EXT_BOARD"
+            else
+                die "external board not recognised on USB (see its output above)"
+            fi ;;
         find)
             echo "  · looking for the external board on the local network …"
             EXT_BOARD=$("$PYBIN" "$BRIDGE" --find 2>/dev/null \
