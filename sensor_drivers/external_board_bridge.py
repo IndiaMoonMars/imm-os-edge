@@ -396,8 +396,16 @@ def local_hosts():
                               text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
         text = ""
+    addrs = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/\d+", text)
+    if not addrs:                     # Windows / macOS (no `ip`): the address this machine uses on the LAN
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+                u.connect(("192.0.2.1", 9))          # no packet is sent; just picks the outgoing interface
+                addrs = [u.getsockname()[0]]
+        except OSError:
+            addrs = []
     hosts = []
-    for addr in re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/\d+", text):
+    for addr in addrs:
         net = ipaddress.ip_network(f"{addr}/24", strict=False)
         hosts += [str(h) for h in net.hosts() if str(h) != addr]
     return hosts
@@ -435,6 +443,11 @@ def main():
     ap.add_argument("--probe", nargs="?", const="", metavar="URL", help="show what the board serves (default EXT_BOARD_URL)")
     ap.add_argument("--find", action="store_true", help="look for the board on the local networks")
     args = ap.parse_args()
+    for stream in (sys.stdout, sys.stderr):           # Windows consoles: don't die on ✓ and ·
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     zone = os.getenv("EXT_BOARD_ZONE", "exterior")
     url, port = os.getenv("EXT_BOARD_URL", ""), os.getenv("EXT_BOARD_PORT", "")
     mapping = parse_map(os.getenv("EXT_BOARD_MAP", ""))
@@ -444,6 +457,8 @@ def main():
         target = args.probe or url
         if not target:
             sys.exit("--probe needs a URL (or EXT_BOARD_URL): the address you open the board's dashboard with")
+        if "<" in target or ">" in target:
+            sys.exit("replace <board-ip> with the board's real address, e.g. --probe http://192.168.1.77/")
         if "://" not in target:
             target = "http://" + target
         sys.exit(0 if probe(target, mapping) else 1)
