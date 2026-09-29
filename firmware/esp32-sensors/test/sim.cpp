@@ -16,6 +16,9 @@
 //     bmereset                    the BME280 power-on resets (a supply dip): settings and data cleared
 //     reset                       reboot the ESP32 (flash contents kept)
 //     o2user                      print what CAL_O2 wrote to the SEN0322
+//     resetreason R               esp_reset_reason() at the next boot (1 power-on, 6 task watchdog, 9 brownout)
+//     i2cstuck N                  a device holds SDA low until SCL is clocked N times
+//     wdt                         print the task watchdog's longest gap between feeds (ms) and its timeout
 // Everything the firmware prints goes to stdout.
 #include <fstream>
 #include <iostream>
@@ -23,9 +26,14 @@
 #include "Arduino.h"
 #include "Preferences.h"
 #include "Wire.h"
+#include "esp_system.h"
+#include "esp_task_wdt.h"
 
 namespace sim {
 uint32_t now_ms = 0, mq4_pin_mv = 0;
+int reset_reason = 1, sda_stuck_clocks = 0, scl_pulses = 0, wire_restarts = 0;
+uint32_t wdt_timeout_s = 0, wdt_last_feed = 0, wdt_max_gap = 0;
+bool wdt_added = false;
 std::string rx, tx;
 std::map<std::string, float> nvs;
 std::map<uint8_t, I2CDevice*> bus;
@@ -157,7 +165,8 @@ int main(int, char** argv) {
   while (std::getline(in, line)) {
     std::istringstream ss(line);
     std::string op; ss >> op;
-    if (!started && op != "remove" && op != "bmp" && op != "o2" && op != "mq4" && op != "bmeignore" && op != "bnost") { setup(); started = true; flush(); }
+    if (!started && op != "remove" && op != "bmp" && op != "o2" && op != "mq4" && op != "bmeignore" && op != "bnost"
+        && op != "resetreason") { setup(); started = true; flush(); }
     if (op == "run") {
       double s; ss >> s;
       const uint32_t end = sim::now_ms + (uint32_t)(s * 1000);
@@ -186,9 +195,13 @@ int main(int, char** argv) {
     else if (op == "bmeignore") ss >> bmeDev.ignoreCtrl;
     else if (op == "bmereset") bmeDev.powerOnReset();
     else if (op == "o2user") std::cout << "O2USER " << o2Dev.writes[0x08] << "\n";
+    else if (op == "resetreason") ss >> sim::reset_reason;
+    else if (op == "i2cstuck") ss >> sim::sda_stuck_clocks;
+    else if (op == "wdt") std::cout << "WDT " << sim::wdt_max_gap << " " << sim::wdt_timeout_s * 1000 << " " << sim::wdt_added << "\n";
     else if (op == "reset") {
       bme.addr = 0; bmeFails = 0; bmeResets = 0; bmeSeenOk = false; scdZeroes = 0; scdFound = false; bnoAddr = 0; o2Addr = 0; mq4R0 = 0; mq4CalLeft = 0; mq4CalSum = 0;
-      lastSample = lastProbe = 0; cmdLen = 0; sim::now_ms = 0; scdDev.running = scdDev.running;   // the SCD40 keeps measuring
+      lastSample = lastProbe = lastBoard = lastRecovery = 0; cmdLen = 0; sim::now_ms = 0; scdDev.running = scdDev.running;   // the SCD40 keeps measuring
+      i2cErr = 0; i2cStreak = 0; i2cRecoveries = 0; sim::wdt_added = false; sim::wdt_max_gap = 0;
       setup();
     }
     flush();

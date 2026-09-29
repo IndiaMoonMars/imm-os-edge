@@ -18,9 +18,14 @@
  *   PA0  ← sensor output node via a 100k/200k divider + 100 nF to GND (sensing circuit at 5 V)
  *   PA9  → Pi RX (pin 10)     PA10 ← Pi TX (pin 8)     GND ↔ Pi GND
  *   PC13   on-board LED: on during the 5 V phase
+ *
+ * Independent watchdog (IWDG, 8 s, runs from its own clock): if the controller hangs, it
+ * resets and starts a fresh heater cycle; after such a reset it says so ("# reset by the
+ * watchdog"), which the Pi's bridge logs.
  */
 #include <Arduino.h>
 #include <EEPROM.h>
+#include <IWatchdog.h>
 #include <math.h>
 
 // ── Hardware ──────────────────────────────────────────────────────
@@ -166,9 +171,12 @@ void setup() {
   loadR0();
   setHeater(true);
   PiSerial.println("# IMM-OS MQ-7 controller started (60 s @ 5 V, 90 s @ 1.4 V)");
+  if (IWatchdog.isReset(true)) PiSerial.println("# reset by the watchdog (the controller had hung): new heater cycle");
+  IWatchdog.begin(8000000);                        // µs; loop() reloads it every pass
 }
 
 void loop() {
+  IWatchdog.reload();
   while (PiSerial.available()) {
     const char c = (char)PiSerial.read();
     if (c == '\n' || c == '\r') {

@@ -11,11 +11,28 @@ namespace sim {
 extern uint32_t now_ms;
 extern uint32_t mq4_pin_mv;   // what analogReadMilliVolts(32) returns
 extern std::string rx, tx;    // bytes from / to the Pi
+extern int sda_stuck_clocks;  // > 0: a device holds SDA low until SCL is clocked this many more times
+extern int scl_pulses;
 }
 
 inline uint32_t millis() { return sim::now_ms; }
 inline void delay(uint32_t ms) { sim::now_ms += ms; }
+inline void delayMicroseconds(uint32_t) {}
 inline uint32_t analogReadMilliVolts(uint8_t) { return sim::mq4_pin_mv; }
+
+#define LOW 0
+#define HIGH 1
+#define INPUT_PULLUP 0x05
+#define OUTPUT_OPEN_DRAIN 0x12
+inline void pinMode(int, int) {}
+inline int digitalRead(int pin) { return pin == 21 && sim::sda_stuck_clocks > 0 ? LOW : HIGH; }
+inline void digitalWrite(int pin, int v) {        // a rising edge on SCL (GPIO22) clocks the stuck device on
+  static int scl = HIGH;
+  if (pin == 22) {
+    if (scl == LOW && v == HIGH) { sim::scl_pulses++; if (sim::sda_stuck_clocks > 0) sim::sda_stuck_clocks--; }
+    scl = v;
+  }
+}
 
 class HardwareSerial {
  public:

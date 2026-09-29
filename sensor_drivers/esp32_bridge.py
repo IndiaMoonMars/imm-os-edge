@@ -8,11 +8,14 @@ and each section is published on its own topic in the same shape as the Pi-wired
 
     bme280  habitat/sensors/bme280/<zone>   temp, hum, pres, dew_point_c
     scd40   habitat/sensors/scd40/<zone>    co2_ppm, temp, hum, dew_point_c
-    o2      habitat/sensors/o2/<zone>       o2_pct            (DFRobot SEN0322)
+    o2      habitat/sensors/o2/<zone>       o2_pct, calibrated (DFRobot SEN0322; calibrated 0 until CAL_O2)
     bno055  habitat/sensors/bno055/<zone>   heading_deg, roll_deg, pitch_deg, lin_acc_ms2, imu_calib,
                                             grav_ms2, mag_ut, gyro_dps, temp, calib_gyro/acc/mag
     mq4     habitat/sensors/mq4/<zone>      vout_mv, rs_rl, rs_r0, ch4_ppm, warming, calibrated
                                             (rs_r0 once calibrated, ch4_ppm once also warm)
+    board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, bme_resets
+                                            (every 10 s: the MCC alarms on crashes, watchdog
+                                            resets, brownouts and BME280 power losses)
 
 dew_point_c is calculated here from temp and hum (Magnus formula). The same air has the same
 dew point wherever it is measured, so the BME280's and SCD40's should agree even when their
@@ -38,12 +41,14 @@ BAUD_RATE = 115200
 FIELDS = {
     "bme280": ("temp", "hum", "pres"),
     "scd40": ("co2_ppm", "temp", "hum"),
-    "o2": ("o2_pct",),
+    "o2": ("o2_pct", "calibrated"),
     "bno055": ("heading_deg", "roll_deg", "pitch_deg", "lin_acc_ms2", "imu_calib",
                "grav_ms2", "mag_ut", "gyro_dps", "temp", "calib_gyro", "calib_acc", "calib_mag"),
     "mq4": ("vout_mv", "rs_rl", "rs_r0", "ch4_ppm", "warming", "calibrated"),
+    "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets"),
 }
-INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated"}
+INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated",
+              "uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets"}
 DEW_POINT_SENSORS = ("bme280", "scd40")
 
 

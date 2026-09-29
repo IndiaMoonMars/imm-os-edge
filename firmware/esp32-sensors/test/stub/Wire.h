@@ -11,7 +11,7 @@ struct I2CDevice {
   virtual std::vector<uint8_t> read(size_t n) = 0;             // one read transaction
 };
 
-namespace sim { extern std::map<uint8_t, I2CDevice*> bus; }
+namespace sim { extern std::map<uint8_t, I2CDevice*> bus; extern int sda_stuck_clocks; extern int wire_restarts; }
 
 class TwoWire {
   uint8_t addr_ = 0;
@@ -19,12 +19,14 @@ class TwoWire {
   size_t pos_ = 0;
  public:
   bool begin(int, int) { return true; }
+  bool end() { sim::wire_restarts++; return true; }
   void setClock(uint32_t) {}
   void setTimeOut(uint16_t) {}
   void beginTransmission(uint8_t a) { addr_ = a; out_.clear(); }
   size_t write(uint8_t b) { out_.push_back(b); return 1; }
   size_t write(const uint8_t* d, size_t n) { out_.insert(out_.end(), d, d + n); return n; }
   uint8_t endTransmission(bool = true) {
+    if (sim::sda_stuck_clocks > 0) return 4;                   // bus error: SDA held low
     auto it = sim::bus.find(addr_);
     if (it == sim::bus.end()) return 2;                        // address NACK
     if (!out_.empty()) it->second->write(out_);
@@ -32,6 +34,7 @@ class TwoWire {
   }
   uint8_t requestFrom(uint8_t a, uint8_t n) {
     in_.clear(); pos_ = 0;
+    if (sim::sda_stuck_clocks > 0) return 0;
     auto it = sim::bus.find(a);
     if (it == sim::bus.end()) return 0;
     in_ = it->second->read(n);

@@ -3,10 +3,14 @@
 #include <map>
 #include <string>
 namespace sim { extern std::map<std::string, float> nvs; }
+#include <cstdint>
 class Preferences {
  public:
   bool begin(const char*, bool) { return true; }
   bool isKey(const char* k) { return sim::nvs.count(k) > 0; }
   float getFloat(const char* k, float def) { auto it = sim::nvs.find(k); return it == sim::nvs.end() ? def : it->second; }
   size_t putFloat(const char* k, float v) { sim::nvs[k] = v; return 4; }
+  uint32_t getUInt(const char* k, uint32_t def) { auto it = sim::nvs.find(k); return it == sim::nvs.end() ? def : (uint32_t)it->second; }
+  size_t putUInt(const char* k, uint32_t v) { sim::nvs[k] = (float)v; return 4; }
+  void end() {}
 };

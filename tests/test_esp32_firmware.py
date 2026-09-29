@@ -181,3 +181,41 @@ def test_scd40_co2_zero_is_left_out(sim, tmp_path):
     scd = [d["scd40"] for d in data if "scd40" in d]
     assert scd and all("co2_ppm" not in s for s in scd) and scd[0]["temp"] == pytest.approx(24.43, abs=0.01)
     assert sum("scd40: CO2 reads 0" in n for n in notes) == 1                    # said once, not every reading
+
+
+def test_board_health_reset_reason_and_boot_count(sim, tmp_path):
+    data, notes = sim("resetreason 9\n" + BASE + "run 21\nreset\nrun 1\n", tmp_path)
+    boards = [d["board"] for d in data if "board" in d]
+    assert boards[0] == {"uptime_s": boards[0]["uptime_s"], "reset_reason": 9, "boot_count": 1, "i2c_err": 0, "bme_resets": 0}
+    assert len(boards) >= 3                                       # every 10 s, and in the first line after a boot
+    assert boards[-1]["boot_count"] == 2                          # counted in flash across the reset
+    assert any("BROWNOUT" in n for n in notes)                    # STATUS at boot explains reason 9
+
+
+def test_task_watchdog_is_fed_through_normal_work(sim, tmp_path):
+    # includes a re-probe for a missing sensor and a bus recovery: the slowest things the loop does
+    data, notes = sim("remove bno\n" + BASE + "run 35\ni2cstuck 5\nrun 10\nadd bno\nrun 35\nwdt\n", tmp_path)
+    gap, timeout, added = map(int, next(n for n in notes if n.startswith("WDT")).split()[1:])
+    assert added == 1 and timeout == 10000 and gap < timeout / 2
+
+
+def test_stuck_i2c_bus_is_recovered_and_sensors_come_back(sim, tmp_path):
+    data, notes = sim(BASE + "run 3\ni2cstuck 5\nrun 12\n", tmp_path)
+    assert any("bus recovered" in n for n in notes)
+    after = data[-1]
+    assert {"bme280", "o2", "bno055"} <= set(after)               # readings again after the recovery
+    assert after["board"]["i2c_err"] >= 20 if "board" in after else True
+    errs = [d["board"]["i2c_err"] for d in data if "board" in d]
+    assert errs[-1] >= 20
+
+
+def test_o2_reports_whether_it_was_calibrated(sim, tmp_path):
+    data, _ = sim(BASE + "run 2\n", tmp_path)                    # key register 0: factory default
+    assert data[-1]["o2"]["calibrated"] == 0
+    data, _ = sim(BASE.replace("o2 0 110 5 0", "o2 190 110 0 0") + "run 2\n", tmp_path)
+    assert data[-1]["o2"]["calibrated"] == 1
+
+
+def test_missing_sensor_probes_are_not_i2c_errors(sim, tmp_path):
+    data, _ = sim("remove bno\nremove o2\n" + BASE + "run 65\n", tmp_path)     # two re-probes
+    assert [d["board"]["i2c_err"] for d in data if "board" in d][-1] == 0

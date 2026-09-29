@@ -148,3 +148,14 @@ def test_opening_the_port_does_not_reset_the_board(monkeypatch):
     esp32_bridge.open_port("/dev/ttyUSB0")
     assert states[-1] == (False, False)
     assert (False, True) not in states, states           # DTR off + RTS on = EN low = reset
+
+
+def test_board_health_and_o2_calibration_are_published():
+    sys.path.insert(0, os.path.join(ROOT, "sensor_drivers"))
+    import esp32_bridge
+    line = {"ms": 10000, "o2": {"o2_pct": 18.35, "calibrated": 0},
+            "board": {"uptime_s": 10, "reset_reason": 9, "boot_count": 7, "i2c_err": 3, "bme_resets": 0}}
+    out = dict(esp32_bridge.to_payloads(line, 1790000000.0))
+    assert out["habitat/sensors/o2/zone1"]["calibrated"] == 0
+    board = out["habitat/sensors/board/zone1"]
+    assert board["reset_reason"] == 9 and board["boot_count"] == 7 and isinstance(board["i2c_err"], int)

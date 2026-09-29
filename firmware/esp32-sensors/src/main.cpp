@@ -18,9 +18,17 @@
 //    "bno055":{"heading_deg":..,"roll_deg":..,"pitch_deg":..,"lin_acc_ms2":..,"imu_calib":3,
 //              "grav_ms2":9.80,"mag_ut":42.1,"gyro_dps":0.1,"temp":26,
 //              "calib_gyro":3,"calib_acc":3,"calib_mag":3},
-//    "o2":{"o2_pct":20.87},
-//    "mq4":{"vout_mv":1240,"rs_rl":3.03,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1}}
+//    "o2":{"o2_pct":20.87,"calibrated":1},                          (calibrated: CAL_O2 was done)
+//    "mq4":{"vout_mv":1240,"rs_rl":3.03,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1},
+//    "board":{"uptime_s":10,"reset_reason":1,"boot_count":7,"i2c_err":0,"bme_resets":0}}  (every 10 s)
 // Lines starting with '#' are diagnostics.
+//
+// Fault tolerance:
+//   - task watchdog (10 s): a loop that hangs (an I2C transaction that never ends, a bug)
+//     resets the board; the reset reason and a boot counter (flash) are reported in "board",
+//     so the MCC sees a crash, a watchdog reset or a brownout (supply dip) for what it is
+//   - I2C bus recovery: when every transaction fails for a while (a device holding SDA low),
+//     SCL is clocked 9 times to free the bus, a STOP is sent and the sensors are set up again
 //
 // Commands (a line sent to the board):
 //   STATUS   which sensors were found, MQ-4 calibration
@@ -29,10 +37,30 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <esp_idf_version.h>
+#include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <math.h>
 
 static const int PIN_SDA = 21, PIN_SCL = 22, PIN_MQ4 = 32;
-static const uint32_t PERIOD_MS = 1000, REPROBE_MS = 30000;
+static const uint32_t PERIOD_MS = 1000, REPROBE_MS = 30000, BOARD_MS = 10000;
+static const uint32_t WDT_TIMEOUT_S = 10;
+static const int I2C_STUCK_STREAK = 20;         // consecutive failed transactions before a bus recovery
+
+// ── board health ─────────────────────────────────────────────────────
+static int resetReason = 0;                      // esp_reset_reason(): 1 power-on, 4 crash, 6 task watchdog, 9 brownout …
+static uint32_t bootCount = 0;                   // boots since flashing (flash)
+static uint32_t i2cErr = 0;                      // failed I2C transactions with a sensor that was found
+static int i2cStreak = 0, i2cRecoveries = 0;
+static bool i2cQuiet = false;                    // while looking for sensors: a missing one is not an error
+static uint32_t lastRecovery = 0;
+
+static void i2cResult(bool ok) {
+  if (ok) { i2cStreak = 0; return; }
+  if (i2cQuiet) return;
+  ++i2cErr;
+  ++i2cStreak;
+}
 
 // MQ-4: 5 V heater and load circuit on the module, AO divided down to the ESP32's range
 #ifndef MQ4_DIVIDER
@@ -50,7 +78,9 @@ static bool probe(uint8_t addr) { Wire.beginTransmission(addr); return Wire.endT
 static bool writeBytes(uint8_t addr, const uint8_t* data, size_t n) {
   Wire.beginTransmission(addr);
   Wire.write(data, n);
-  return Wire.endTransmission() == 0;
+  const bool ok = Wire.endTransmission() == 0;
+  i2cResult(ok);
+  return ok;
 }
 
 static bool writeReg(uint8_t addr, uint8_t reg, uint8_t value) {
@@ -59,7 +89,9 @@ static bool writeReg(uint8_t addr, uint8_t reg, uint8_t value) {
 }
 
 static bool readBytes(uint8_t addr, uint8_t* out, size_t n) {
-  if (Wire.requestFrom(addr, (uint8_t)n) != n) return false;
+  const bool ok = Wire.requestFrom(addr, (uint8_t)n) == n;
+  i2cResult(ok);
+  if (!ok) return false;
   for (size_t i = 0; i < n; i++) out[i] = (uint8_t)Wire.read();
   return true;
 }
@@ -313,9 +345,10 @@ static bool o2Init() {
   return false;
 }
 
-static bool o2Read(float& pct) {
+static bool o2Read(float& pct, bool& calibrated) {
   uint8_t k, d[3];
   if (!o2Addr || !readRegs(o2Addr, 0x0A, &k, 1) || !readRegs(o2Addr, 0x03, d, 3)) return false;
+  calibrated = k != 0;                                          // 0: never calibrated (factory default key)
   const float key = k ? k / 1000.0f : 20.9f / 120.0f;           // calibration key stored in the sensor
   pct = key * (d[0] + d[1] / 10.0f + d[2] / 100.0f);
   return true;
@@ -343,7 +376,7 @@ static Mq4Reading mq4Read() {
 }
 
 // ── Main loop ────────────────────────────────────────────────────────
-static uint32_t lastSample = 0, lastProbe = 0;
+static uint32_t lastSample = 0, lastProbe = 0, lastBoard = 0;
 static int bmeFails = 0, scdZeroes = 0;
 static char cmd[32];
 static int cmdLen = 0;
@@ -358,6 +391,11 @@ static void status() {
     snprintf(b, sizeof b, "bme280: chip reset %d time(s) since start", bmeResets);
     diag(b);
   }
+  snprintf(b, sizeof b, "board: boot %lu, last reset reason %d%s, %lu I2C error(s), %d bus recover(ies)",
+           (unsigned long)bootCount, resetReason,
+           resetReason == 9 ? " (BROWNOUT: the supply dipped)" : resetReason == 6 || resetReason == 7 ? " (WATCHDOG)" :
+           resetReason == 4 ? " (CRASH)" : "", (unsigned long)i2cErr, i2cRecoveries);
+  diag(b);
   if (bnoAddr) {
     snprintf(b, sizeof b, "bno055 self-test: accel=%s mag=%s gyro=%s mcu=%s",
              bnoSelfTest & 1 ? "pass" : "FAIL", bnoSelfTest & 2 ? "pass" : "FAIL",
@@ -367,10 +405,53 @@ static void status() {
 }
 
 static void findSensors() {
+  i2cQuiet = true;
   if (!bme.addr) bmeInit();
   if (!scdFound) scdInit();
   if (!bnoAddr) bnoInit();
   if (!o2Addr) o2Init();
+  i2cQuiet = false;
+}
+
+// A device that lost its place mid-transfer can hold SDA low forever: every transaction then
+// fails. Clock SCL until it lets go (at most 9 bits), send a STOP, restart the controller and
+// set the sensors up again (the one that hung may have reset).
+static void i2cRecover() {
+  Wire.end();
+  pinMode(PIN_SDA, INPUT_PULLUP);
+  pinMode(PIN_SCL, OUTPUT_OPEN_DRAIN);
+  for (int i = 0; i < 9 && digitalRead(PIN_SDA) == LOW; i++) {
+    digitalWrite(PIN_SCL, LOW);  delayMicroseconds(5);
+    digitalWrite(PIN_SCL, HIGH); delayMicroseconds(5);
+  }
+  pinMode(PIN_SDA, OUTPUT_OPEN_DRAIN);                          // STOP: SDA low → high while SCL is high
+  digitalWrite(PIN_SDA, LOW);  delayMicroseconds(5);
+  digitalWrite(PIN_SCL, HIGH); delayMicroseconds(5);
+  digitalWrite(PIN_SDA, HIGH); delayMicroseconds(5);
+  Wire.begin(PIN_SDA, PIN_SCL);
+  Wire.setClock(100000);
+  Wire.setTimeOut(50);
+  ++i2cRecoveries;
+  i2cStreak = 0;
+  char m[96];
+  snprintf(m, sizeof m, "i2c: every transaction failing: bus recovered (%d time(s) since start), sensors set up again",
+           i2cRecoveries);
+  diag(m);
+  bme.addr = 0; scdFound = false; bnoAddr = 0; o2Addr = 0;
+  findSensors();
+}
+
+static void watchdogStart() {
+#if ESP_IDF_VERSION_MAJOR >= 5
+  esp_task_wdt_config_t cfg = {};
+  cfg.timeout_ms = WDT_TIMEOUT_S * 1000;
+  cfg.idle_core_mask = 0;
+  cfg.trigger_panic = true;                                     // reset the board, don't just log
+  if (esp_task_wdt_reconfigure(&cfg) != ESP_OK) esp_task_wdt_init(&cfg);
+#else
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);                       // (re)configures it if the core already started it
+#endif
+  esp_task_wdt_add(NULL);                                       // this task (setup/loop) must check in
 }
 
 static void handleCommand() {
@@ -393,6 +474,14 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(100000);                // BNO055 stretches the clock; 100 kHz keeps every device happy
   Wire.setTimeOut(50);
+  resetReason = (int)esp_reset_reason();
+  {
+    Preferences board;
+    board.begin("imm-board", false);
+    bootCount = board.getUInt("boots", 0) + 1;
+    board.putUInt("boots", bootCount);
+    board.end();
+  }
   prefs.begin("imm-mq4", false);
   mq4R0 = prefs.isKey("r0") ? prefs.getFloat("r0", 0) : 0;   // isKey: no "NOT_FOUND" error log before CAL_MQ4
   delay(800);                           // BNO055 boot time after power-up
@@ -400,9 +489,11 @@ void setup() {
   findSensors();
   status();
   lastProbe = millis();
+  watchdogStart();
 }
 
 void loop() {
+  esp_task_wdt_reset();
   while (Serial.available()) {
     const int c = Serial.read();
     if (c == '\n' || c == '\r') handleCommand();
@@ -414,10 +505,14 @@ void loop() {
     lastProbe = now;
     if (!bme.addr || !scdFound || !bnoAddr || !o2Addr) findSensors();
   }
+  if (i2cStreak >= I2C_STUCK_STREAK && now - lastRecovery >= 10000) {
+    lastRecovery = now;
+    i2cRecover();
+  }
   if (now - lastSample < PERIOD_MS) return;
   lastSample = now;
 
-  char line[768];
+  char line[1024];
   int n = snprintf(line, sizeof line, "{\"ms\":%lu", (unsigned long)now);
   float a, b, c;
   BnoReading bno;
@@ -448,8 +543,9 @@ void loop() {
                   "\"calib_gyro\":%d,\"calib_acc\":%d,\"calib_mag\":%d}",
                   bno.heading, bno.roll, bno.pitch, bno.linAcc, bno.calSys, bno.grav, bno.mag, bno.gyro, bno.temp,
                   bno.calGyro, bno.calAcc, bno.calMag);
-  if (o2Read(a))
-    n += snprintf(line + n, sizeof line - n, ",\"o2\":{\"o2_pct\":%.2f}", a);
+  bool o2Cal = false;
+  if (o2Read(a, o2Cal))
+    n += snprintf(line + n, sizeof line - n, ",\"o2\":{\"o2_pct\":%.2f,\"calibrated\":%d}", a, o2Cal ? 1 : 0);
 
   const Mq4Reading mq = mq4Read();
   const bool warming = now < MQ4_WARMUP_MS;
@@ -471,6 +567,12 @@ void loop() {
       if (!warming) n += snprintf(line + n, sizeof line - n, ",\"ch4_ppm\":%.1f", MQ4_A * powf(ratio, MQ4_B));
     }
     n += snprintf(line + n, sizeof line - n, ",\"warming\":%d,\"calibrated\":%d}", warming ? 1 : 0, mq4R0 > 0 ? 1 : 0);
+  }
+  if (now - lastBoard >= BOARD_MS || lastBoard == 0) {
+    lastBoard = now;
+    n += snprintf(line + n, sizeof line - n,
+                  ",\"board\":{\"uptime_s\":%lu,\"reset_reason\":%d,\"boot_count\":%lu,\"i2c_err\":%lu,\"bme_resets\":%d}",
+                  (unsigned long)(now / 1000), resetReason, (unsigned long)bootCount, (unsigned long)i2cErr, bmeResets);
   }
   snprintf(line + n, sizeof line - n, "}");
   Serial.println(line);

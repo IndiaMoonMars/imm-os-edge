@@ -127,3 +127,10 @@ def test_ecg_and_o2_default_to_separate_adcs(monkeypatch):
     monkeypatch.delenv("O2_ADS_ADDRESS", raising=False)
     table = bringup.sensors()
     assert table["ecg"].i2c == [0x48] and table["o2"].i2c == [0x49]
+
+
+def test_stm32_watchdog_reloaded_every_pass_and_reset_reported(firmware_sim, tmp_path):
+    out = firmware_sim("adc 1500\nrun 320\nwdt\nwdtreset\nreset\nrun 1\n", tmp_path)
+    gap, timeout = map(int, next(line for line in out if line.startswith("WDT")).split()[1:])
+    assert timeout == 8000 and gap < 1000                      # two full cycles: never close to the timeout
+    assert any("reset by the watchdog" in line for line in out)
