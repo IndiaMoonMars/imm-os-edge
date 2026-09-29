@@ -46,11 +46,11 @@ install_unit() {
 }
 
 echo "Installing units (code $IMM_HOME, user $IMM_USER, python $IMM_PYTHON)"
-for unit in imm-sensor-pipeline@.service imm-lighting-controller.service imm-eclss@.service imm-eva@.service \
+for unit in imm-sensor-pipeline@.service imm-lighting-controller.service imm-eclss@.service imm-eva@.service imm-sd-recorder.service \
             imm-mcc-discovery.service imm-mcc-discovery.timer; do
     install_unit "$unit"
 done
-install -d -o "$IMM_USER" -g "$IMM_USER" /var/lib/imm-os /var/lib/imm-os/blackbox /var/lib/imm-os/spool
+install -d -o "$IMM_USER" -g "$IMM_USER" /var/lib/imm-os /var/lib/imm-os/blackbox /var/lib/imm-os/spool /var/lib/imm-os/records
 systemctl daemon-reload
 
 # Hardware watchdog: a hung kernel or systemd resets the Pi (systemd/imm-watchdog.conf)
@@ -102,6 +102,14 @@ for d in ${IMM_EVA_DAEMONS:-}; do
     systemctl enable --now "imm-eva@$d"
 done
 
+# SD-card recorder: every reading as CSV, filed by sol (core/sd_recorder.py). IMM_SD_RECORDER=false turns it off.
+if [ "${IMM_SD_RECORDER:-true}" != "false" ]; then
+    echo "Starting the SD-card recorder (/var/lib/imm-os/records)"
+    systemctl enable --now imm-sd-recorder.service
+else
+    systemctl disable --now imm-sd-recorder.service >/dev/null 2>&1 || true
+fi
+
 echo "Starting MCC discovery (every minute: re-finds the MCC if its IP address changes)"
 systemctl enable --now imm-mcc-discovery.timer
 
@@ -110,4 +118,4 @@ systemctl enable --now imm-lighting-controller.service
 
 echo "Deployment complete. Status:"
 sleep 2
-systemctl --no-pager --lines=0 status 'imm-sensor-pipeline@*' 'imm-eclss@*' 'imm-eva@*' imm-lighting-controller.service imm-mcc-discovery.timer || true
+systemctl --no-pager --lines=0 status 'imm-sensor-pipeline@*' 'imm-eclss@*' 'imm-eva@*' imm-lighting-controller.service imm-sd-recorder.service imm-mcc-discovery.timer || true
