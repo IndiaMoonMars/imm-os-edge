@@ -40,6 +40,8 @@ The MQ-7 CO sensor runs on an STM32: [firmware/stm32-mq7](firmware/stm32-mq7/REA
 The ESP32 sensor board (BME280, SCD40, BNO055, SEN0322 O₂, MQ-4 methane) plugs into a Pi USB
 port and is read by `esp32_bridge.py`: [firmware/esp32-sensors](firmware/esp32-sensors/README.md).
 Check every one of its values, with hands-on tests: `sudo .venv/bin/python tools/verify_esp32.py`.
+The external board (TEL0157 GNSS, SEN0463 Geiger) is read over Wi-Fi or USB by `external_board_bridge.py`:
+[firmware/esp32-external](firmware/esp32-external/README.md) (read its wiring review before powering it).
 
 No hardware at hand? `tools/hwsim` stands in for the sensor libraries, so the unmodified drivers
 run on a laptop: `PYTHONPATH=tools/hwsim python sensor_drivers/ecg_driver.py`.
