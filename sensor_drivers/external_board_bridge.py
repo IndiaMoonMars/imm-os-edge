@@ -424,10 +424,47 @@ def serial_ports(find=None):
     return ports or sorted(find("/dev/ttyUSB*") + find("/dev/ttyACM*"))
 
 
-def listen(port: str, seconds: float = 8.0, out=print, opener=None) -> tuple:
+def port_users(port: str, proc="/proc") -> list:
+    """Other processes with this serial port open: "pid command" (Linux; own-user processes only
+    unless run with sudo)."""
+    target, me, users = os.path.realpath(port), os.getpid(), []
+    try:
+        pids = [p for p in os.listdir(proc) if p.isdigit() and int(p) != me]
+    except OSError:
+        return users
+    for pid in pids:
+        try:
+            fds = os.listdir(f"{proc}/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.path.realpath(f"{proc}/{pid}/fd/{fd}") == target:
+                    with open(f"{proc}/{pid}/cmdline", "rb") as f:
+                        cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+                    users.append(f"{pid} {cmd[:100]}")
+                    break
+            except OSError:
+                continue
+    return users
+
+
+def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_users) -> tuple:
     """Read a USB serial port at the usual speeds and show what the board prints.
     Returns (baud, reading) for the speed whose output has GNSS/Geiger values, else (0, None)."""
     opener = opener or (lambda p, b: open_serial(p, b, exclusive=True))
+    held = users(port)
+    if held:
+        out(f"  ✗ {port} is already open in another program, which takes what the board prints:")
+        for u in held:
+            out(f"      {u}")
+        if any("esp32_bridge.py" in u for u in held):
+            out("    that is the INTERNAL board's driver, reading this board because it found no other ESP32. "
+                "Stop it (sudo systemctl stop imm-sensor-pipeline@esp32_bridge.py), or set ESP32_PORT / "
+                "EXT_BOARD_PORT in /etc/imm-os/edge.env")
+        else:
+            out("    stop it first, e.g.: sudo systemctl stop 'imm-sensor-pipeline@*'")
+        return 0, None
     for baud in (115200, 9600, 57600, 38400):
         try:
             ser = opener(port, baud)

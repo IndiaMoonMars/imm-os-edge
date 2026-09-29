@@ -218,21 +218,21 @@ def test_listen_finds_speed_and_values():
         if baud == 115200:
             return FakeSerial(["\x8f\x02\xfe\x81garbage\n"] * 3)            # wrong speed looks like noise
         return FakeSerial(SKETCH_OUTPUT)
-    baud, reading = eb.listen("/dev/ttyUSB1", seconds=0.2, out=lines.append, opener=opener)
+    baud, reading = eb.listen("/dev/ttyUSB1", seconds=0.2, out=lines.append, opener=opener, users=lambda p: [])
     assert baud == 9600 and reading["geiger"]["cpm"] in (24.0, 25.0)
     assert any("EXT_BOARD_PORT=/dev/ttyUSB1 EXT_BOARD_BAUD=9600" in ln for ln in lines)
 
 
 def test_listen_recognises_the_internal_board_and_a_busy_port():
     lines = []
-    baud, _ = eb.listen("/dev/ttyUSB0", seconds=0.2, out=lines.append,
+    baud, _ = eb.listen("/dev/ttyUSB0", seconds=0.2, out=lines.append, users=lambda p: [],
                         opener=lambda p, b: FakeSerial(['{"bme280": {"temp": 24.1}, "scd40": {"co2_ppm": 600}}\n']))
     assert baud == 0 and any("INTERNAL" in ln for ln in lines)
 
     def busy(p, b):
         raise OSError("[Errno 11] Could not exclusively lock port /dev/ttyUSB0: Resource temporarily unavailable")
     lines = []
-    assert eb.listen("/dev/ttyUSB0", seconds=0.1, out=lines.append, opener=busy)[0] == 0
+    assert eb.listen("/dev/ttyUSB0", seconds=0.1, out=lines.append, opener=busy, users=lambda p: [])[0] == 0
     assert any("in use by a running service" in ln for ln in lines)
 
 
@@ -242,3 +242,17 @@ def test_internal_board_never_takes_the_external_boards_port():
     find = lambda pat: ports if "by-id" in pat else []          # noqa: E731
     assert hw.esp32_port({"EXT_BOARD_PORT": ports[0]}, find) == ports[1]
     assert hw.esp32_port({}, find) == ports[0]
+
+
+def test_listen_names_the_program_holding_the_port(tmp_path):
+    dev = tmp_path / "ttyUSB1"
+    dev.write_text("")
+    pid = tmp_path / "proc" / "4242"
+    (pid / "fd").mkdir(parents=True)
+    (pid / "fd" / "3").symlink_to(dev)
+    (pid / "cmdline").write_bytes(b"python3\0sensor_drivers/esp32_bridge.py\0--mode\0both\0")
+    assert eb.port_users(str(dev), proc=str(tmp_path / "proc")) == ["4242 python3 sensor_drivers/esp32_bridge.py --mode both"]
+    lines = []
+    eb.listen(str(dev), out=lines.append, users=lambda p: eb.port_users(p, proc=str(tmp_path / "proc")),
+              opener=lambda p, b: FakeSerial([]))
+    assert any("INTERNAL board's driver" in ln for ln in lines)
