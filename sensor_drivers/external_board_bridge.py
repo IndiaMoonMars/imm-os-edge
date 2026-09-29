@@ -476,7 +476,7 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
         else:
             out("    stop it first, e.g.: sudo systemctl stop 'imm-sensor-pipeline@*'")
         return 0, None
-    for baud in (115200, 9600, 57600, 38400):
+    for baud in (115200, 9600, 57600, 38400, 74880, 19200, 230400, 250000, 460800, 921600):
         try:
             ser = opener(port, baud)
         except Exception as e:                          # busy, no permission, gone
@@ -494,7 +494,7 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
         if reset and baud == 115200:
             out("  · restarting the ESP32 over USB (its start-up message comes at 115200 baud) …")
             reset_board(ser)
-        end = time.monotonic() + seconds
+        end = time.monotonic() + (seconds if baud == 115200 else min(seconds, 3.0))   # the usual speed gets longest
         try:
             while time.monotonic() < end:
                 raw = ser.readline().decode("utf-8", "replace")
@@ -509,7 +509,7 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
         finally:
             ser.close()
         text = "".join(lines)
-        readable = sum(c.isprintable() for c in text) / max(len(text), 1)
+        readable = sum(c.isprintable() and c != "\ufffd" for c in text) / max(len(text), 1)   # � = undecodable byte
         if not lines:
             out(f"  · {baud} baud: nothing printed in {seconds:g} s")
             continue
@@ -539,8 +539,9 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
         out("  ✗ readable, but no GNSS or Geiger values recognised in it")
         return 0, None
     if reset:
-        out(f"  ✗ {port}: nothing, even after a restart: not an ESP32 with a working USB link (try another data "
-            "cable or USB port), or the board isn't powered")
+        out(f"  ✗ {port}: nothing readable at any usual speed, even after a restart. Either the board's program "
+            "sends no text (or at an unusual speed), or the board isn't powered / the cable is charge-only. For the "
+            "internal sensor board: flash the IMM-OS firmware (scripts/flash-esp32.sh), then listen again")
     else:
         out(f"  ✗ {port}: the board printed nothing readable. Run again with --reset to restart it and see "
             "whether the USB link works; its firmware may only serve Wi-Fi (use --find)")

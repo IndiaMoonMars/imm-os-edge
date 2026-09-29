@@ -279,3 +279,15 @@ def test_listen_reset_shows_link_works_but_sketch_is_silent():
     assert probed == ["http://192.168.1.139"]
     assert baud == 0 and ("rts", True) in ser.pins and ser.pins[-1] == ("rts", False)
     assert any("USB link works" in ln for ln in lines)
+
+
+def test_undecodable_bytes_are_not_readable():
+    lines = []
+    garbage = [b"\xff\xfe\x80\n", b"\x8f\x81h\n", b"\x90\xa0qhE\n", b"\xff\xff\n"]
+
+    class G(FakeSerial):
+        def __init__(self):
+            self.lines = list(garbage)
+    baud, _ = eb.listen("/dev/ttyUSB0", seconds=0.1, out=lines.append, users=lambda p: [], opener=lambda p, b: G())
+    assert baud == 0 and not any("readable, but" in ln for ln in lines)
+    assert sum("unreadable" in ln for ln in lines) == 10
