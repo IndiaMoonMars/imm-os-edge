@@ -72,6 +72,20 @@ else
     read -r -a sensors <<< "${IMM_SENSORS:-}"
 fi
 
+# The list is the whole set: a driver taken out of it is stopped and disabled (otherwise it
+# keeps running, e.g. esp32_bridge.py grabbing another board's USB port).
+if [ "$#" -gt 0 ] || [ -n "${IMM_SENSORS+set}" ]; then
+    wants=" ${sensors[*]:-} "
+    for unit in $( { systemctl list-units --all --plain --no-legend 'imm-sensor-pipeline@*' 2>/dev/null | awk '{print $1}'
+                     ls /etc/systemd/system/*.wants/ 2>/dev/null | grep '^imm-sensor-pipeline@' ; } | sort -u); do
+        inst="${unit#imm-sensor-pipeline@}"; inst="${inst%.service}"
+        case "$wants" in *" $inst "*) ;; *)
+            echo "Stopping sensor pipeline $inst (no longer in IMM_SENSORS)"
+            systemctl disable --now "$unit" >/dev/null 2>&1 || true ;;
+        esac
+    done
+fi
+
 for s in "${sensors[@]}"; do
     [ -f "$IMM_HOME/sensor_drivers/$s" ] || { echo "  ! unknown driver $s (not in sensor_drivers/)"; continue; }
     echo "Starting sensor pipeline $s"
