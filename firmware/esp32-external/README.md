@@ -38,6 +38,15 @@ GNSS antenna under open sky and the Geiger tube's HV section (≈400 V) enclosed
 
 ## Connect it to the Pi 5 and IMM-OS
 
+**On a Pi USB port (simplest).** Plug the board into the Pi with a data cable. Then, on the Pi:
+```bash
+cd ~/imm-os-edge && .venv/bin/python sensor_drivers/external_board_bridge.py --listen
+```
+This shows what each USB board prints, tries the usual speeds, and ends with
+`✓ use EXT_BOARD_PORT=… EXT_BOARD_BAUD=…`. Text such as `CPM: 24` / `Lat: 19.07601` works, as well as JSON.
+It also tells you which port is the internal board. Then from the MCC PC:
+`.\scripts\provision-pi.ps1 -PiUser pratham -PiHost node-rpi-01.local -ExtBoard usb`.
+
 **Option A: keep the firmware already on the board** (its own Wi-Fi dashboard). Nothing to flash:
 the Pi reads the same data your dashboard shows.
 

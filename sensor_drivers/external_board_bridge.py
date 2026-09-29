@@ -26,6 +26,10 @@ can't guess: EXT_BOARD_MAP="cpm=rad.count,lat=gps.y" (field = dotted path in the
                     data by script, finds the data URL in it and tries that (use it as EXT_BOARD_URL)
     --find          look for the board on this Pi's local networks
 
+On USB (EXT_BOARD_PORT, speed EXT_BOARD_BAUD, default 115200) the same goes for what the board
+prints: JSON lines, or text such as "CPM: 24" / "Lat: 19.07601 Lon: 72.87765".
+    --listen [PORT] what each USB serial board prints, at the usual speeds, and what is recognised
+
 Modes: stdout | mqtt | both.   --send CMD (USB, IMM-OS firmware): STATUS, WIFI_SSID <name>, WIFI_PASS <pw>, WIFI_OFF
 """
 import argparse
@@ -341,21 +345,141 @@ def run_http(url, publish_fn, zone, now=time.time, sleep=time.sleep, fetch=poll_
         sleep(1.0)
 
 
-def run_serial(port, publish_fn, zone, now=time.time, mapping=None):
-    from esp32_bridge import open_port, parse_line
-    ser = open_port(port)
+class LineCollector:
+    """Serial output of any firmware → complete readings.
+
+    A JSON line is one reading. Text lines ("CPM: 24", "Lat: 19.07601, Lon: 72.87765") are
+    gathered until a name repeats (the next round of prints has started), a blank or
+    "-----" line, or a quiet moment (flush()); then they are one reading."""
+
+    def __init__(self, mapping=None):
+        self.mapping, self.pending = mapping, {}
+
+    def flush(self):
+        out, self.pending = self.pending, {}
+        return recognise(out, self.mapping) if out else None
+
+    def feed(self, line: str):
+        """A reading (this bridge's line format) when one is complete, else None."""
+        s = line.strip()
+        if s.startswith("{"):
+            try:
+                obj = json.loads(s)
+            except ValueError:
+                return None
+            if isinstance(obj, dict):
+                self.pending = {}
+                return recognise(obj, self.mapping)
+            return None
+        if not s or set(s) <= set("-=*_#~. "):
+            return self.flush()
+        pairs = text_pairs(s)
+        if not pairs:
+            return None
+        done = self.flush() if any(k in self.pending for k in pairs) else None
+        self.pending.update(pairs)
+        return done
+
+
+def open_serial(port: str, baud: int, exclusive: bool = False):
+    import serial
+    ser = serial.Serial()
+    ser.port, ser.baudrate, ser.timeout = port, baud, 1.0
+    if exclusive:
+        ser.exclusive = True                            # fails if a running service holds the port
+    ser.open()
+    ser.rts = False                                     # as esp32_bridge.open_port: don't reset the board
+    ser.dtr = False
+    return ser
+
+
+def run_serial(port, publish_fn, zone, now=time.time, mapping=None, baud=115200, ser=None, max_lines=None):
+    ser = ser or open_serial(port, baud)
     ser.reset_input_buffer()
-    while True:
+    col, n, empty = LineCollector(mapping), 0, 0
+    while max_lines is None or n < max_lines:
+        n += 1
         watchdog.kick()
-        parsed = parse_line(ser.readline().decode("utf-8", "replace"))   # 2 s timeout
-        if parsed is None:
+        raw = ser.readline().decode("utf-8", "replace")                 # 1 s timeout
+        if raw.strip().startswith("#"):
+            print(json.dumps({"info": f"external board: {raw.strip().lstrip('# ')}"}), file=sys.stderr, flush=True)
             continue
-        kind, value = parsed
-        if kind == "data":
-            for topic, payload in to_payloads(recognise(value, mapping), now(), zone):
-                publish_fn(payload, topic)
-        elif kind == "info":
-            print(json.dumps({"info": f"external board: {value}"}), file=sys.stderr, flush=True)
+        line = col.feed(raw) if raw else col.flush()                    # quiet: what was gathered is a reading
+        if not line:
+            continue
+        out = to_payloads(line, now(), zone)
+        empty = 0 if out else empty + 1
+        if empty in (5, 300):
+            print(json.dumps({"error": f"{port} prints, but no GNSS or Geiger values were recognised: "
+                                       "run external_board_bridge.py --listen to see its output"}),
+                  file=sys.stderr, flush=True)
+        for topic, payload in out:
+            publish_fn(payload, topic)
+
+
+def serial_ports(find=None):
+    import glob
+    find = find or glob.glob
+    ports = sorted(find("/dev/serial/by-id/*"))
+    return ports or sorted(find("/dev/ttyUSB*") + find("/dev/ttyACM*"))
+
+
+def listen(port: str, seconds: float = 8.0, out=print, opener=None) -> tuple:
+    """Read a USB serial port at the usual speeds and show what the board prints.
+    Returns (baud, reading) for the speed whose output has GNSS/Geiger values, else (0, None)."""
+    opener = opener or (lambda p, b: open_serial(p, b, exclusive=True))
+    for baud in (115200, 9600, 57600, 38400):
+        try:
+            ser = opener(port, baud)
+        except Exception as e:                          # busy, no permission, gone
+            msg = str(e)
+            if "busy" in msg.lower() or "lock" in msg.lower() or "exclusive" in msg.lower():
+                out(f"  ✗ {port} is in use by a running service (the internal board's driver, if this is the "
+                    "internal board; or external_board_bridge.py). Stop it first: "
+                    "sudo systemctl stop 'imm-sensor-pipeline@*'")
+            elif "permission" in msg.lower():
+                out(f"  ✗ no permission for {port}: your user needs the dialout group (log out and in after setup-node.sh)")
+            else:
+                out(f"  ✗ {port}: {msg}")
+            return 0, None
+        lines, col, best = [], LineCollector(), None
+        end = time.monotonic() + seconds
+        try:
+            while time.monotonic() < end:
+                raw = ser.readline().decode("utf-8", "replace")
+                if raw.strip():
+                    lines.append(raw.rstrip())
+                line = col.feed(raw) if raw else col.flush()
+                if line and score(line) > score(best or {}):
+                    best = line
+            last = col.flush()
+            if last and score(last) > score(best or {}):
+                best = last
+        finally:
+            ser.close()
+        text = "".join(lines)
+        readable = sum(c.isprintable() for c in text) / max(len(text), 1)
+        if not lines:
+            out(f"  · {baud} baud: nothing printed in {seconds:g} s")
+            continue
+        if readable < 0.9:
+            out(f"  · {baud} baud: unreadable (wrong speed)")
+            continue
+        out(f"  · {baud} baud, {len(lines)} lines, for example:")
+        for ln in lines[-6:]:
+            out(f"      {ln[:110]}")
+        if any('"bme280"' in ln or '"scd40"' in ln or '"bno055"' in ln for ln in lines):
+            out("  · this is the INTERNAL sensor board (BME280/SCD40/…), not the external one")
+            return 0, None
+        if best and score(best):
+            out(f"  · recognised: {summarise(best)}")
+            out(f"  ✓ use EXT_BOARD_PORT={port} EXT_BOARD_BAUD={baud}")
+            return baud, best
+        out("  ✗ readable, but no GNSS or Geiger values recognised in it")
+        return 0, None
+    out(f"  ✗ {port}: the board printed nothing readable. Its firmware may only serve Wi-Fi (use --find), "
+        "or it needs a reset (press EN on the ESP32 while listening)")
+    return 0, None
 
 
 # ── Finding the board and its data URL ──────────────────────────────
@@ -487,6 +611,8 @@ def main():
     ap.add_argument("--send", metavar="CMD", help="a command for the board over USB (STATUS, WIFI_SSID …)")
     ap.add_argument("--probe", nargs="?", const="", metavar="URL", help="show what the board serves (default EXT_BOARD_URL)")
     ap.add_argument("--find", action="store_true", help="look for the board on the local networks")
+    ap.add_argument("--listen", nargs="?", const="", metavar="PORT",
+                    help="show what a USB-connected board prints (default: every USB serial port)")
     args = ap.parse_args()
     for stream in (sys.stdout, sys.stderr):           # Windows consoles: don't die on ✓ and ·
         try:
@@ -496,8 +622,19 @@ def main():
     zone = os.getenv("EXT_BOARD_ZONE", "exterior")
     url, port = os.getenv("EXT_BOARD_URL", ""), os.getenv("EXT_BOARD_PORT", "")
     mapping = parse_map(os.getenv("EXT_BOARD_MAP", ""))
+    baud = int(os.getenv("EXT_BOARD_BAUD", "115200") or 115200)
     if args.find:
         sys.exit(0 if find() else 1)
+    if args.listen is not None:
+        ports = [args.listen] if args.listen else serial_ports()
+        if not ports:
+            sys.exit("no USB serial device: plug the board into a Pi USB port with a data cable "
+                     "(charge-only cables don't work); check with: ls /dev/ttyUSB* /dev/ttyACM*")
+        ok = False
+        for p in ports:
+            print(f"── {p}")
+            ok = listen(p)[0] > 0 or ok
+        sys.exit(0 if ok else 1)
     if args.probe is not None:
         target = args.probe or url
         if not target:
@@ -525,7 +662,7 @@ def main():
     if url:
         run_http(url, publish_fn, zone, mapping=mapping)
     elif port:
-        run_serial(port, publish_fn, zone, mapping=mapping)
+        run_serial(port, publish_fn, zone, mapping=mapping, baud=baud)
     else:
         print(json.dumps({"error": "set EXT_BOARD_URL=http://<board-ip>/json (Wi-Fi) or EXT_BOARD_PORT (USB) "
                                    "in /etc/imm-os/edge.env"}), file=sys.stderr)

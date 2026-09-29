@@ -36,9 +36,9 @@
 #   --eclss "…"          eclss/ daemons, e.g. "water_monitor eclss_pid"
 #   --eva "…"            eva/ daemons, e.g. "gps_driver uwb_driver position_fusion"
 #   --crew-id ID         wearer of this EVA kit (EVA nodes)
-#   --ext-board URL|find the external GNSS + Geiger board's data URL (EXT_BOARD_URL), e.g.
-#                        http://192.168.1.77/json; "find" looks for it on the local network
-#                        and adds external_board_bridge.py to --sensors
+#   --ext-board WHERE    the external GNSS + Geiger board, and adds external_board_bridge.py:
+#                        usb (on a Pi USB port; found by what it prints), /dev/serial/by-id/…,
+#                        http://<board-ip>/ (over Wi-Fi), or find (search the local network)
 #   --user USER          service user (default: the user who ran sudo)
 #   --direct             no local broker: services connect straight to the MCC
 #   --skip-apt           don't install packages
@@ -316,18 +316,29 @@ if [ "$NO_SYSMON" = 0 ]; then
 fi
 if [ -n "$EXT_BOARD" ]; then
     PYBIN="$REPO/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN=python3
-    if [ "$EXT_BOARD" = find ]; then
-        echo "  · looking for the external board on the local network …"
-        EXT_BOARD=$("$PYBIN" "$REPO/sensor_drivers/external_board_bridge.py" --find 2>/dev/null \
-                    | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
-        [ -n "$EXT_BOARD" ] || die "external board not found: is it on the same Wi-Fi as the Pi? Pass --ext-board http://<board-ip>/"
-        ok "external board: $EXT_BOARD"
-    else
-        EXT_BOARD=$("$PYBIN" "$REPO/sensor_drivers/external_board_bridge.py" --probe "$EXT_BOARD" 2>/dev/null \
-                    | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
-        [ -n "$EXT_BOARD" ] || warn "the external board did not answer with GNSS/Geiger values now; set EXT_BOARD_URL later"
-    fi
-    [ -z "$EXT_BOARD" ] || updates+=("EXT_BOARD_URL=$EXT_BOARD")
+    BRIDGE="$REPO/sensor_drivers/external_board_bridge.py"
+    case "$EXT_BOARD" in
+        usb|/dev/*)      # on a Pi USB port: find which port, and its speed, from what it prints
+            echo "  · listening to the USB serial ports for the external board …"
+            ARG=""; [ "$EXT_BOARD" = usb ] || ARG="$EXT_BOARD"
+            found=$("$PYBIN" "$BRIDGE" --listen $ARG 2>&1 | tee /dev/stderr \
+                    | sed -n 's/.*EXT_BOARD_PORT=\([^ ]*\) EXT_BOARD_BAUD=\([0-9]*\).*/\1 \2/p' | head -1 || true)
+            [ -n "$found" ] || die "external board not recognised on USB (see its output above)"
+            updates+=("EXT_BOARD_PORT=${found% *}" "EXT_BOARD_BAUD=${found#* }" "EXT_BOARD_URL=")
+            ok "external board on ${found% *} at ${found#* } baud"
+            EXT_BOARD="" ;;
+        find)
+            echo "  · looking for the external board on the local network …"
+            EXT_BOARD=$("$PYBIN" "$BRIDGE" --find 2>/dev/null \
+                        | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
+            [ -n "$EXT_BOARD" ] || die "external board not found: is it on the same Wi-Fi as the Pi? Pass --ext-board http://<board-ip>/"
+            ok "external board: $EXT_BOARD" ;;
+        *)
+            EXT_BOARD=$("$PYBIN" "$BRIDGE" --probe "$EXT_BOARD" 2>/dev/null \
+                        | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
+            [ -n "$EXT_BOARD" ] || warn "the external board did not answer with GNSS/Geiger values now; set EXT_BOARD_URL later" ;;
+    esac
+    [ -z "$EXT_BOARD" ] || updates+=("EXT_BOARD_URL=$EXT_BOARD" "EXT_BOARD_PORT=")
     [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
     case " $SENSORS " in *" external_board_bridge.py "*) ;; *) SENSORS=$(echo "$SENSORS external_board_bridge.py" | xargs) ;; esac
 fi

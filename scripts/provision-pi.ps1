@@ -34,8 +34,9 @@ param(
     # Sensor drivers to run, e.g. "bme280_driver.py scd40_driver.py". Leave empty until
     # each sensor has passed tools/bringup.py; node health (sysmon) always runs.
     [string]$Sensors = '',
-    # External GNSS + Geiger board: its dashboard address (e.g. http://192.168.1.77/), or 'find'
-    # to look for it on the Pi's network. Adds external_board_bridge.py to the sensors.
+    # External GNSS + Geiger board: 'usb' when it is plugged into the Pi (found by what it prints),
+    # its address over Wi-Fi (e.g. http://192.168.1.77/), or 'find' to search the Pi's network.
+    # Adds external_board_bridge.py to the sensors already running.
     [string]$ExtBoard = '',
     # This PC's LAN address; found automatically when empty
     [string]$MccIp = '',

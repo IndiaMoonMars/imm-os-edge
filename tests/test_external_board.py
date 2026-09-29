@@ -164,3 +164,81 @@ def test_find_survives_odd_devices():
     found = eb.find(["10.0.0.5", "10.0.0.6", "10.0.0.7"], get=get, out=lines.append, port_open=lambda h: True)
     assert found == ["http://10.0.0.7/"]
     assert any('10.0.0.6: web server, "Router"' in ln for ln in lines)
+
+
+# ── On USB, with the board's own firmware ─────────────────────────────
+
+class FakeSerial:
+    def __init__(self, lines):
+        self.lines = [ln.encode() for ln in lines]
+
+    def readline(self):
+        return self.lines.pop(0) if self.lines else b""
+
+    def reset_input_buffer(self):
+        pass
+
+    def close(self):
+        pass
+
+
+SKETCH_OUTPUT = ["CPM: 24\r\n", "uSv/h: 0.16\r\n", "Lat: 19.076010 Lon: 72.877650\r\n", "Satellites: 8\r\n",
+                 "CPM: 25\r\n", "uSv/h: 0.16\r\n", "Lat: 19.076011 Lon: 72.877651\r\n", "Satellites: 8\r\n", ""]
+
+
+def test_text_prints_are_grouped_into_readings():
+    col = eb.LineCollector()
+    got = [r for r in (col.feed(ln) for ln in SKETCH_OUTPUT[:-1]) if r] + [col.flush()]
+    assert len(got) == 2
+    assert got[0]["geiger"]["cpm"] == 24.0 and got[0]["gnss"]["lat"] == 19.07601 and got[0]["gnss"]["sats"] == 8.0
+    assert got[1]["geiger"]["cpm"] == 25.0
+
+
+def test_serial_publishes_the_sketchs_prints():
+    sent = []
+    eb.run_serial("/dev/x", lambda p, t: sent.append((t, p)), "exterior", now=lambda: 1.0,
+                  ser=FakeSerial(SKETCH_OUTPUT), max_lines=len(SKETCH_OUTPUT))
+    geiger = [p for t, p in sent if t == "habitat/sensors/geiger/exterior"]
+    assert [p["cpm"] for p in geiger] == [24.0, 25.0]
+    assert any(t == "habitat/sensors/gnss/exterior" and p["sats"] == 8 for t, p in sent)
+
+
+def test_serial_still_reads_imm_os_firmware():
+    import json
+    sent = []
+    eb.run_serial("/dev/x", lambda p, t: sent.append(t), "exterior", now=lambda: 1.0,
+                  ser=FakeSerial(["# ready\n", json.dumps(LINE) + "\n"]), max_lines=2)
+    assert len(sent) == 3
+
+
+def test_listen_finds_speed_and_values():
+    lines = []
+
+    def opener(port, baud):
+        if baud == 115200:
+            return FakeSerial(["\x8f\x02\xfe\x81garbage\n"] * 3)            # wrong speed looks like noise
+        return FakeSerial(SKETCH_OUTPUT)
+    baud, reading = eb.listen("/dev/ttyUSB1", seconds=0.2, out=lines.append, opener=opener)
+    assert baud == 9600 and reading["geiger"]["cpm"] in (24.0, 25.0)
+    assert any("EXT_BOARD_PORT=/dev/ttyUSB1 EXT_BOARD_BAUD=9600" in ln for ln in lines)
+
+
+def test_listen_recognises_the_internal_board_and_a_busy_port():
+    lines = []
+    baud, _ = eb.listen("/dev/ttyUSB0", seconds=0.2, out=lines.append,
+                        opener=lambda p, b: FakeSerial(['{"bme280": {"temp": 24.1}, "scd40": {"co2_ppm": 600}}\n']))
+    assert baud == 0 and any("INTERNAL" in ln for ln in lines)
+
+    def busy(p, b):
+        raise OSError("[Errno 11] Could not exclusively lock port /dev/ttyUSB0: Resource temporarily unavailable")
+    lines = []
+    assert eb.listen("/dev/ttyUSB0", seconds=0.1, out=lines.append, opener=busy)[0] == 0
+    assert any("in use by a running service" in ln for ln in lines)
+
+
+def test_internal_board_never_takes_the_external_boards_port():
+    import hw
+    ports = ["/dev/serial/by-id/usb-Silicon_Labs_CP2102_A-if00-port0", "/dev/serial/by-id/usb-Silicon_Labs_CP2102_B-if00-port0"]
+    find = lambda pat: ports if "by-id" in pat else []          # noqa: E731
+    assert hw.esp32_port({"EXT_BOARD_PORT": ports[0]}, find) == ports[1]
+    assert hw.esp32_port({}, find) == ports[0]

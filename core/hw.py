@@ -79,14 +79,19 @@ ESP32_USB_IDS = ("CP210", "Silicon_Labs", "1a86", "CH340", "CH9102", "wch.cn", "
 
 
 def esp32_port(env=os.environ, find=glob.glob) -> str:
-    """The ESP32 sensor board's USB serial port: ESP32_PORT, else the first known USB-serial chip."""
+    """The internal ESP32 sensor board's USB serial port: ESP32_PORT, else the first known
+    USB-serial chip that isn't EXT_BOARD_PORT (the external board)."""
     if env.get("ESP32_PORT"):
         return env["ESP32_PORT"]
+    ext = env.get("EXT_BOARD_PORT", "")            # the external GNSS + Geiger board: never this one
+
+    def other(path):
+        return not ext or os.path.realpath(path) != os.path.realpath(ext)
     for path in sorted(find("/dev/serial/by-id/*")):
-        if any(i.lower() in os.path.basename(path).lower() for i in ESP32_USB_IDS):
+        if any(i.lower() in os.path.basename(path).lower() for i in ESP32_USB_IDS) and other(path):
             return path
-    for path in ("/dev/ttyUSB0", "/dev/ttyACM0"):
-        if find(path):
+    for path in ("/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyUSB1", "/dev/ttyACM1"):
+        if find(path) and other(path):
             return path
     return ""
 
