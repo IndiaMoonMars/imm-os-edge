@@ -36,6 +36,9 @@
 #   --eclss "…"          eclss/ daemons, e.g. "water_monitor eclss_pid"
 #   --eva "…"            eva/ daemons, e.g. "gps_driver uwb_driver position_fusion"
 #   --crew-id ID         wearer of this EVA kit (EVA nodes)
+#   --ext-board URL|find the external GNSS + Geiger board's data URL (EXT_BOARD_URL), e.g.
+#                        http://192.168.1.77/json; "find" looks for it on the local network
+#                        and adds external_board_bridge.py to --sensors
 #   --user USER          service user (default: the user who ran sudo)
 #   --direct             no local broker: services connect straight to the MCC
 #   --skip-apt           don't install packages
@@ -50,7 +53,7 @@ CONF_DIR="${IMM_CONF_DIR:-/etc/imm-os}"
 ENV_FILE="$CONF_DIR/edge.env"
 HOSTS_FILE="${IMM_HOSTS_FILE:-/etc/hosts}"
 
-NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID="" SECRETS_FILE=""
+NODE_ID="" ZONE="" MCC_IP="" MCC_NAME="imm.local" CA="" CREW_ID="" SECRETS_FILE="" EXT_BOARD=""
 SENSORS="__unset__" ECLSS="__unset__" EVA="__unset__"
 SVC_USER="${SUDO_USER:-}"
 SKIP_APT=0 SKIP_IF=0 NO_SERVICES=0 CHECK_ONLY=0 DRY=0 NO_SYSMON=0 DIRECT=0
@@ -74,6 +77,7 @@ while [ $# -gt 0 ]; do
         --eclss) ECLSS="$2"; shift 2 ;;
         --eva) EVA="$2"; shift 2 ;;
         --crew-id) CREW_ID="$2"; shift 2 ;;
+        --ext-board) EXT_BOARD="$2"; shift 2 ;;
         --user) SVC_USER="$2"; shift 2 ;;
         --skip-apt) SKIP_APT=1; shift ;;
         --direct) DIRECT=1; shift ;;
@@ -82,7 +86,7 @@ while [ $# -gt 0 ]; do
         --no-services) NO_SERVICES=1; shift ;;
         --check-only) CHECK_ONLY=1; shift ;;
         --dry-run) DRY=1; shift ;;
-        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
 done
@@ -309,6 +313,23 @@ updates=(
 if [ "$NO_SYSMON" = 0 ]; then
     [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
     case " $SENSORS " in *" sysmon_driver.py "*) ;; *) SENSORS=$(echo "sysmon_driver.py $SENSORS" | xargs) ;; esac
+fi
+if [ -n "$EXT_BOARD" ]; then
+    PYBIN="$REPO/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN=python3
+    if [ "$EXT_BOARD" = find ]; then
+        echo "  · looking for the external board on the local network …"
+        EXT_BOARD=$("$PYBIN" "$REPO/sensor_drivers/external_board_bridge.py" --find 2>/dev/null \
+                    | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
+        [ -n "$EXT_BOARD" ] || die "external board not found: is it on the same Wi-Fi as the Pi? Pass --ext-board http://<board-ip>/"
+        ok "external board: $EXT_BOARD"
+    else
+        EXT_BOARD=$("$PYBIN" "$REPO/sensor_drivers/external_board_bridge.py" --probe "$EXT_BOARD" 2>/dev/null \
+                    | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
+        [ -n "$EXT_BOARD" ] || warn "the external board did not answer with GNSS/Geiger values now; set EXT_BOARD_URL later"
+    fi
+    [ -z "$EXT_BOARD" ] || updates+=("EXT_BOARD_URL=$EXT_BOARD")
+    [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
+    case " $SENSORS " in *" external_board_bridge.py "*) ;; *) SENSORS=$(echo "$SENSORS external_board_bridge.py" | xargs) ;; esac
 fi
 [ "$SENSORS" = "__unset__" ] || updates+=("IMM_SENSORS=$SENSORS")
 [ "$ECLSS" = "__unset__" ] || updates+=("IMM_ECLSS_DAEMONS=$ECLSS")

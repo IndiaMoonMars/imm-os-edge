@@ -34,6 +34,9 @@ param(
     # Sensor drivers to run, e.g. "bme280_driver.py scd40_driver.py". Leave empty until
     # each sensor has passed tools/bringup.py; node health (sysmon) always runs.
     [string]$Sensors = '',
+    # External GNSS + Geiger board: its dashboard address (e.g. http://192.168.1.77/), or 'find'
+    # to look for it on the Pi's network. Adds external_board_bridge.py to the sensors.
+    [string]$ExtBoard = '',
     # This PC's LAN address; found automatically when empty
     [string]$MccIp = '',
     [string]$InfraDir = '',
@@ -201,6 +204,7 @@ if ($LASTEXITCODE -ne 0) { Fail 'copying the secrets failed' }
 $setup = 'cd ~/imm-os-edge && sudo ./scripts/setup-node.sh --secrets-file ~/.imm-secrets' +
     " --node-id $NodeId --zone $Zone --mcc-ip $MccIp --ca ~/mqtt-ca.crt"
 if ($Sensors) { $setup += " --sensors '$Sensors'" }
+if ($ExtBoard) { $setup += " --ext-board '$ExtBoard'" }
 if ($DryRun) { $setup += ' --dry-run' }
 & ssh -t @SshOpts $Target $setup
 $rc = $LASTEXITCODE

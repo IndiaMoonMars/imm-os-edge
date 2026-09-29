@@ -12,23 +12,36 @@ and publishes each section on its own topic, like the other drivers:
     gnss    habitat/sensors/gnss/<zone>     fix, sats, lat, lon, alt_m, sog_kn, cog_deg
     board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, rssi_dbm
 
-Zone: EXT_BOARD_ZONE (default "exterior"). The Pi time-stamps each line when it arrives; the
-board's GNSS UTC is sent as gnss_utc when there is a fix (the MCC compares clocks with it).
-A line seen twice (Wi-Fi poll faster than the board) is published once.
+Zone: EXT_BOARD_ZONE (default "exterior"; not replaced by the node's IMM_ZONE). The Pi
+time-stamps each line when it arrives; the board's GNSS UTC is sent as gnss_utc when there is
+a fix. A line seen twice (Wi-Fi poll faster than the board) is published once.
 
-Modes: stdout | mqtt | both.   --send CMD (USB only): STATUS, WIFI_SSID <name>, WIFI_PASS <pw>, WIFI_OFF
+Boards running other firmware (for example a dashboard of your own) work too, without
+reflashing: any JSON the board serves, or even a page that shows the values as text
+("CPM: 24", "Latitude: 19.07601"), is read by recognising the usual names (cpm, usv/h, dose,
+lat/latitude, lon/lng/longitude, alt, sats/satellites, speed, course, fix, rssi …). Names it
+can't guess: EXT_BOARD_MAP="cpm=rad.count,lat=gps.y" (field = dotted path in the board's JSON).
+
+    --probe [URL]   what the board serves and which values are recognised; if the page loads its
+                    data by script, finds the data URL in it and tries that (use it as EXT_BOARD_URL)
+    --find          look for the board on this Pi's local networks
+
+Modes: stdout | mqtt | both.   --send CMD (USB, IMM-OS firmware): STATUS, WIFI_SSID <name>, WIFI_PASS <pw>, WIFI_OFF
 """
 import argparse
+import html
 import json
 import os
+import re
+import socket
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
-from mqtt_publisher import MODES, make_publisher  # noqa: E402
-import watchdog  # noqa: E402
+import watchdog  # noqa: E402   (mqtt_publisher is imported in main: --probe/--find need no paho)
 
 FIELDS = {
     "geiger": ("cpm", "usv_h", "counts", "warming"),
@@ -44,16 +57,205 @@ def to_payloads(line: dict, now: float, zone: str):
         sec = line.get(sensor)
         if not isinstance(sec, dict):
             continue
-        p = {"sensor": sensor, "timestamp": round(now, 3)}
+        p = {"sensor": sensor, "timestamp": round(now, 3), "zone": zone}     # zone set: IMM_ZONE doesn't replace it
         for f in fields:
             v = sec.get(f)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 p[f] = int(v) if f in INT_FIELDS else float(v)
         if sensor == "gnss" and isinstance(sec.get("utc"), str):
             p["gnss_utc"] = sec["utc"][:24]
-        if len(p) > 2:
+        if len(p) > 3:
             out.append((f"habitat/sensors/{sensor}/{zone}", p))
     return out
+
+
+# ── Any board firmware: recognise the values by name ──────────────────
+# (section, field, pattern on the name lower-cased with only letters and digits, factor)
+RULES = [
+    ("geiger", "cpm", r"(geiger|radiation|rad|gm)?(cpm|countsperminute|countspermin|clicksperminute)", 1.0),
+    ("geiger", "usv_h", r"(geiger|radiation|rad|gm|dose|doserate)?(usvh|usvhr|usv|usvperh|usvperhour|microsieverts?(perhour|h)?|"
+                        r"usieverts?(perhour|h)?|doserate|dose|svrate|usvrate)", 1.0),
+    ("geiger", "counts", r"(geiger)?(counts|count|pulses|totalcounts|totalcount|clicks)", 1.0),
+    ("gnss", "lat", r"(gps|gnss)?(lat|latitude|latitudedegree|latdeg)", 1.0),
+    ("gnss", "lon", r"(gps|gnss)?(lon|lng|long|longitude|longitudedegree|londeg|lngdeg)", 1.0),
+    ("gnss", "alt_m", r"(gps|gnss)?(alt|altitude|altm|altitudem)", 1.0),
+    ("gnss", "sats", r"(gps|gnss)?(sats|satellites|satellitesused|satsused|numsat|numsats|satnum|satcount|satsinuse|"
+                     r"satellitesinuse|starnum|usedstar|numsatused|satellitecount)", 1.0),
+    ("gnss", "sog_kn", r"(gps|gnss)?(sog|sogkn|speedkn|speedknots?|knots)", 1.0),
+    ("gnss", "sog_kn", r"(gps|gnss)?(speedkmh|speedkph|kmh|kph|speedkmhr)", 1 / 1.852),
+    ("gnss", "sog_kn", r"(gps|gnss)?(speedms|speedmps|mps)", 1.943844),
+    ("gnss", "cog_deg", r"(gps|gnss)?(cog|cogdeg|course|coursedeg|courseoverground)", 1.0),
+    ("gnss", "fix", r"(gps|gnss)?(fix|hasfix|fixed|valid|fixvalid|isvalid|fixok|locationvalid|fixquality|fixstatus)", 1.0),
+    ("board", "rssi_dbm", r"(wifi)?(rssi|rssidbm|wifirssi|signaldbm)", 1.0),
+    ("board", "uptime_s", r"(uptime|uptimes|uptimesec|uptimeseconds)", 1.0),
+]
+TEXT_RULES = [   # strings
+    ("gnss", "utc", r"(gps|gnss)?(utc|utctime|datetime|time|timestamp)"),
+    ("gnss", "lat_dir", r"(gps|gnss)?(latdir|latdirection|ns|latns|lathemisphere)"),
+    ("gnss", "lon_dir", r"(gps|gnss)?(londir|londirection|ew|lonew|lonhemisphere)"),
+]
+_RULES = [(sec, f, re.compile(f"^(?:{pat})$"), k) for sec, f, pat, k in RULES]
+_TEXT_RULES = [(sec, f, re.compile(f"^(?:{pat})$")) for sec, f, pat in TEXT_RULES]
+_NUM = re.compile(r"^\s*([-+]?\d+(?:\.\d+)?)\s*(?:°|deg)?\s*([NSEWnsew])?\b")
+
+
+def _key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower().replace("µ", "u").replace("μ", "u"))
+
+
+def _number(v):
+    """(value, hemisphere letter or None) from a number, bool or text like "19.07601 N"."""
+    if isinstance(v, bool):
+        return float(v), None
+    if isinstance(v, (int, float)):
+        return float(v), None
+    if isinstance(v, str):
+        low = v.strip().lower()
+        if low in ("true", "yes", "ok", "valid", "fix", "3d", "2d"):
+            return 1.0, None
+        if low in ("false", "no", "none", "invalid", "nofix", "no fix", "-", ""):
+            return 0.0, None
+        m = _NUM.match(v)
+        if m:
+            return float(m.group(1)), (m.group(2) or "").upper() or None
+    return None, None
+
+
+def flatten(obj, prefix="") -> dict:
+    out = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.update(flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            out.update(flatten(v, f"{prefix}.{i}"))
+    else:
+        out[prefix] = obj
+    return out
+
+
+def parse_map(spec: str) -> dict:
+    """EXT_BOARD_MAP "cpm=rad.count, lat=gps.y" → {"cpm": "rad.count", …}."""
+    out = {}
+    for part in (spec or "").split(","):
+        if "=" in part:
+            f, path = (x.strip() for x in part.split("=", 1))
+            if f and path:
+                out[f] = path
+    return out
+
+
+def _section_of(field: str) -> str:
+    for sec, fields in FIELDS.items():
+        if field in fields:
+            return sec
+    return "gnss" if field in ("utc", "lat_dir", "lon_dir") else ""
+
+
+def recognise(obj, mapping: dict = None) -> dict:
+    """Any board's data (JSON object, or {label: text} from a page) → this bridge's line format."""
+    if isinstance(obj, dict) and "ms" in obj and not mapping and \
+            (isinstance(obj.get("geiger"), dict) or isinstance(obj.get("gnss"), dict)):
+        return obj                                             # IMM-OS firmware (firmware/esp32-external)
+    flat = flatten(obj) if isinstance(obj, (dict, list)) else {}
+    line = {"geiger": {}, "gnss": {}, "board": {}}
+    extra = {}
+    by_path = {p.lower(): v for p, v in flat.items()}
+    for field, path in (mapping or {}).items():
+        v = by_path.get(path.lower())
+        sec = _section_of(field)
+        if v is None or not sec:
+            continue
+        if field in ("utc", "lat_dir", "lon_dir"):
+            (extra if field != "utc" else line[sec])[field] = str(v)
+        else:
+            n, hemi = _number(v)
+            if n is not None:
+                line[sec][field] = n
+                if hemi:
+                    extra[f"{field}_hemi"] = hemi
+    taken = set((mapping or {}).values())
+    for path, v in flat.items():
+        if path in taken:
+            continue
+        leaf = _key(path.rsplit(".", 1)[-1])
+        parent = _key(path.rsplit(".", 2)[-2]) if "." in path else ""
+        hit = False
+        for sec, field, rx, factor in _RULES:
+            if (rx.match(leaf) or (parent in ("gps", "gnss", "geiger", "radiation") and rx.match(parent + leaf))) \
+                    and field not in line[sec]:
+                n, hemi = _number(v)
+                if n is not None:
+                    line[sec][field] = n * factor
+                    if hemi:
+                        extra[f"{field}_hemi"] = hemi
+                hit = True
+                break
+        if hit or not isinstance(v, str):
+            continue
+        for sec, field, rx in _TEXT_RULES:
+            if rx.match(leaf):
+                if field == "utc":
+                    if re.search(r"\d[:T-]\d", v):                 # a time, not just a number
+                        line[sec].setdefault("utc", v.strip())
+                else:
+                    extra.setdefault(field, v.strip().upper()[:1])
+                break
+    g = line["gnss"]
+    for f, dir_key, neg in (("lat", "lat_dir", "S"), ("lon", "lon_dir", "W")):
+        if f not in g:
+            continue
+        v, lim = g[f], (90 if f == "lat" else 180)
+        if abs(v) > lim and abs(v) <= lim * 100:                  # NMEA ddmm.mmmm, not degrees
+            v = (int(abs(v) / 100) + (abs(v) % 100) / 60) * (1 if v >= 0 else -1)
+        hemi = extra.get(f"{f}_hemi") or extra.get(dir_key)
+        if hemi == neg and v > 0:
+            v = -v
+        g[f] = round(v, 7)
+    if "fix" in g:
+        g["fix"] = 1 if g["fix"] > 0 else 0
+    if g.get("lat") == 0 and g.get("lon") == 0:                   # a board without a fix often shows 0, 0
+        g.pop("lat"), g.pop("lon")
+        g.setdefault("fix", 0)
+    if "fix" not in g and ("lat" in g or "sats" in g):
+        g["fix"] = 1 if "lat" in g and "lon" in g else 0
+    if not g.get("fix"):
+        for f in ("lat", "lon", "alt_m", "sog_kn", "cog_deg"):      # no fix: no position
+            g.pop(f, None)
+    geo = line["geiger"]
+    if "cpm" in geo and "usv_h" not in geo:
+        geo["usv_h"] = round(geo["cpm"] / 153.8, 4)               # M4011 (SEN0463), as the IMM-OS firmware
+    elif "usv_h" in geo and "cpm" not in geo:
+        geo["cpm"] = round(geo["usv_h"] * 153.8, 1)
+    return {k: v for k, v in line.items() if v}
+
+
+_TAG = re.compile(r"<(script|style)\b.*?</\1>|<[^>]+>", re.S | re.I)
+_PAIR = re.compile(r"([A-Za-zµμ][A-Za-z0-9µμ /()._%-]{0,40}?)\s*[:=]\s*"
+                   r"([-+]?\d+(?:\.\d+)?\s*(?:°|deg)?\s*[NSEWnsew]?\b|true|false|yes|no)", re.I)
+
+
+def text_pairs(text: str) -> dict:
+    """ "CPM: 24<br>Latitude: 19.07601 N" → {"CPM": "24", "Latitude": "19.07601 N"} (a page's visible text)."""
+    plain = html.unescape(_TAG.sub("\n", text))
+    out = {}
+    for label, value in _PAIR.findall(plain):
+        label = label.strip()
+        if "(" in label and ")" not in label:
+            label = label.split("(")[0].strip()
+        out.setdefault(label, value.strip())
+    return out
+
+
+def parse_body(text: str):
+    """The board's answer as data: JSON if it is JSON, else the label: value pairs in its text."""
+    t = text.strip()
+    if t[:1] in "{[":
+        try:
+            return json.loads(t)
+        except ValueError:
+            pass
+    return text_pairs(t)
 
 
 class Dedup:
@@ -72,13 +274,17 @@ class Dedup:
         return True
 
 
-def poll_http(url: str, timeout: float = 3.0):
+def get_text(url: str, timeout: float = 3.0) -> str:
     with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8", "replace"))
+        return r.read(512 * 1024).decode("utf-8", "replace")
 
 
-def run_http(url, publish_fn, zone, now=time.time, sleep=time.sleep, fetch=poll_http, max_loops=None):
-    dedup, failing, n = Dedup(), 0, 0
+def poll_http(url: str, timeout: float = 3.0):
+    return parse_body(get_text(url, timeout))
+
+
+def run_http(url, publish_fn, zone, now=time.time, sleep=time.sleep, fetch=poll_http, max_loops=None, mapping=None):
+    dedup, failing, n, empty = Dedup(), 0, 0, 0
     while max_loops is None or n < max_loops:
         n += 1
         watchdog.kick()                 # alive even while the board is away (that is reported, not restarted)
@@ -88,8 +294,14 @@ def run_http(url, publish_fn, zone, now=time.time, sleep=time.sleep, fetch=poll_
                 print(json.dumps({"info": f"external board reachable again after {failing} failed poll(s)"}),
                       file=sys.stderr, flush=True)
             failing = 0
-            if isinstance(line, dict) and dedup.new(line):
-                for topic, payload in to_payloads(line, now(), zone):
+            if isinstance(line, (dict, list)) and dedup.new(line if isinstance(line, dict) else {}):
+                out = to_payloads(recognise(line, mapping), now(), zone)
+                empty = 0 if out else empty + 1
+                if empty in (5, 300):
+                    print(json.dumps({"error": f"{url} answers, but with no GNSS or Geiger values in it: run "
+                                               "external_board_bridge.py --probe to find the board's data URL"}),
+                          file=sys.stderr, flush=True)
+                for topic, payload in out:
                     publish_fn(payload, topic)
         except (urllib.error.URLError, OSError, ValueError) as e:
             failing += 1
@@ -98,7 +310,7 @@ def run_http(url, publish_fn, zone, now=time.time, sleep=time.sleep, fetch=poll_
         sleep(1.0)
 
 
-def run_serial(port, publish_fn, zone, now=time.time):
+def run_serial(port, publish_fn, zone, now=time.time, mapping=None):
     from esp32_bridge import open_port, parse_line
     ser = open_port(port)
     ser.reset_input_buffer()
@@ -109,19 +321,132 @@ def run_serial(port, publish_fn, zone, now=time.time):
             continue
         kind, value = parsed
         if kind == "data":
-            for topic, payload in to_payloads(value, now(), zone):
+            for topic, payload in to_payloads(recognise(value, mapping), now(), zone):
                 publish_fn(payload, topic)
         elif kind == "info":
             print(json.dumps({"info": f"external board: {value}"}), file=sys.stderr, flush=True)
 
 
+# ── Finding the board and its data URL ──────────────────────────────
+_DATA_URL = re.compile(r"""(?:fetch|\$\.getJSON|\$\.get|\$\.ajax|axios\.get|EventSource)\s*\(\s*['"`]([^'"`]+)['"`]"""
+                       r"""|\.open\s*\(\s*['"]GET['"]\s*,\s*['"`]([^'"`]+)['"`]""", re.I)
+_WS = re.compile(r"""new\s+WebSocket\s*\(""", re.I)
+COMMON_PATHS = ["/json", "/data", "/api", "/api/data", "/readings", "/sensors", "/sensor", "/values", "/status",
+                "/getData", "/data.json", "/sensor-data"]
+
+
+def summarise(line: dict) -> str:
+    parts = [f"{sec}.{k}={v:g}" if isinstance(v, (int, float)) else f"{sec}.{k}={v}"
+             for sec, vals in line.items() if isinstance(vals, dict) for k, v in vals.items()]
+    return ", ".join(parts) or "nothing recognised"
+
+
+def score(line: dict) -> int:
+    return sum(len(v) for v in line.values() if isinstance(v, dict))
+
+
+def probe(url: str, mapping=None, get=get_text, out=print) -> str:
+    """Fetch url and show what is recognised; if it's a page that loads its data by script, try the
+    data URLs it names and the usual ones. Returns the best URL for EXT_BOARD_URL ('' if none)."""
+    from urllib.parse import urljoin
+    try:
+        body = get(url)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        out(f"  ✗ {url}: {e}")
+        return ""
+    line = recognise(parse_body(body), mapping)
+    out(f"  · {url}: {summarise(line)}")
+    best, best_score = (url, score(line)) if score(line) else ("", 0)
+    if body.lstrip()[:1] not in "{[":
+        named = [a or b for a, b in _DATA_URL.findall(body)]
+        if named:
+            out(f"  · the page loads data from: {', '.join(named)}")
+        if _WS.search(body):
+            out("  · the page also uses a WebSocket: values pushed that way aren't read; "
+                "an HTTP data URL (below) or the IMM-OS firmware is needed")
+        tried = set()
+        for path in named + COMMON_PATHS:
+            u = urljoin(url, path)
+            if u in tried or u == url or u.startswith(("ws:", "wss:")):
+                continue
+            tried.add(u)
+            try:
+                b = get(u)
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+            ln = recognise(parse_body(b), mapping)
+            if score(ln):
+                out(f"  · {u}: {summarise(ln)}")
+            if score(ln) > best_score:
+                best, best_score = u, score(ln)
+    if best:
+        out(f"  ✓ use EXT_BOARD_URL={best}")
+    else:
+        out("  ✗ no GNSS or Geiger values found. Send the board's dashboard code to whoever maintains IMM-OS, "
+            "set EXT_BOARD_MAP, or flash firmware/esp32-external")
+    return best
+
+
+def local_hosts():
+    """Every address on this Pi's /24 networks (not itself)."""
+    import ipaddress
+    import subprocess
+    try:
+        text = subprocess.run(["ip", "-4", "-o", "addr", "show", "scope", "global"], capture_output=True,
+                              text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        text = ""
+    hosts = []
+    for addr in re.findall(r"inet (\d+\.\d+\.\d+\.\d+)/\d+", text):
+        net = ipaddress.ip_network(f"{addr}/24", strict=False)
+        hosts += [str(h) for h in net.hosts() if str(h) != addr]
+    return hosts
+
+
+def find(hosts=None, get=get_text, out=print, port_open=None) -> list:
+    """Look for a web server on the local networks whose data has GNSS or Geiger values."""
+    def is_open(h):
+        try:
+            with socket.create_connection((h, 80), timeout=0.4):
+                return True
+        except OSError:
+            return False
+    port_open = port_open or is_open
+    hosts = local_hosts() if hosts is None else hosts
+    out(f"  · looking at {len(hosts)} addresses for a web server …")
+    with ThreadPoolExecutor(64) as ex:
+        up = [h for h, o in zip(hosts, ex.map(port_open, hosts)) if o]
+    found = []
+    for h in up:
+        best = probe(f"http://{h}/", get=get, out=lambda s: None)
+        if best:
+            out(f"  ✓ board at {h}: EXT_BOARD_URL={best}")
+            found.append(best)
+    if not found:
+        out(f"  ✗ none of the {len(up)} web servers found serves GNSS or Geiger values "
+            "(is the board on the same Wi-Fi as the Pi? try --probe http://<board-ip>/)")
+    return found
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", choices=MODES, default="stdout")
+    ap.add_argument("--mode", choices=("stdout", "mqtt", "both"), default="stdout")
     ap.add_argument("--send", metavar="CMD", help="a command for the board over USB (STATUS, WIFI_SSID …)")
+    ap.add_argument("--probe", nargs="?", const="", metavar="URL", help="show what the board serves (default EXT_BOARD_URL)")
+    ap.add_argument("--find", action="store_true", help="look for the board on the local networks")
     args = ap.parse_args()
     zone = os.getenv("EXT_BOARD_ZONE", "exterior")
     url, port = os.getenv("EXT_BOARD_URL", ""), os.getenv("EXT_BOARD_PORT", "")
+    mapping = parse_map(os.getenv("EXT_BOARD_MAP", ""))
+    if args.find:
+        sys.exit(0 if find() else 1)
+    if args.probe is not None:
+        target = args.probe or url
+        if not target:
+            sys.exit("--probe needs a URL (or EXT_BOARD_URL): the address you open the board's dashboard with")
+        if "://" not in target:
+            target = "http://" + target
+        sys.exit(0 if probe(target, mapping) else 1)
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     if args.send:
         if not port:
@@ -135,11 +460,12 @@ def main():
             if p and p[0] == "info":
                 print("  board:", p[1])
         return
+    from mqtt_publisher import make_publisher
     publish_fn = make_publisher(args.mode, f"habitat/sensors/geiger/{zone}")
     if url:
-        run_http(url, publish_fn, zone)
+        run_http(url, publish_fn, zone, mapping=mapping)
     elif port:
-        run_serial(port, publish_fn, zone)
+        run_serial(port, publish_fn, zone, mapping=mapping)
     else:
         print(json.dumps({"error": "set EXT_BOARD_URL=http://<board-ip>/json (Wi-Fi) or EXT_BOARD_PORT (USB) "
                                    "in /etc/imm-os/edge.env"}), file=sys.stderr)

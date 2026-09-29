@@ -174,3 +174,30 @@ def test_max30100_rejects_max30102(monkeypatch):
     from max30100 import MAX30100
     with pytest.raises(RuntimeError, match="MAX30102"):
         MAX30100()
+
+
+def test_setup_ext_board_checks_the_url_and_adds_the_driver(tmp_path):
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"<html><script>fetch('/data')</script></html>" if self.path == "/" else b'{"cpm": 20, "sats": 3}'
+            self.send_response(200 if self.path in ("/", "/data") else 404)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        secrets = tmp_path / "secrets"
+        secrets.write_text("IMM_EDGE_CLIENT_SECRET=a\nMQTT_PASSWORD=b\n")
+        out = _setup_dry(tmp_path, "--secrets-file", str(secrets), "--sensors", "bme280_driver.py",
+                         "--ext-board", f"http://127.0.0.1:{srv.server_port}/")
+    finally:
+        srv.shutdown()
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert f"EXT_BOARD_URL=http://127.0.0.1:{srv.server_port}/data" in out.stdout      # the page's data URL
+    assert "IMM_SENSORS=sysmon_driver.py bme280_driver.py external_board_bridge.py" in out.stdout

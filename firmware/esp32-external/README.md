@@ -17,7 +17,7 @@ Once a second the firmware prints one JSON line on USB serial and serves the sam
  "board":{"uptime_s":61,"reset_reason":1,"boot_count":3,"i2c_err":0,"rssi_dbm":-58}}
 ```
 
-On the Pi, `sensor_drivers/external_board_bridge.py` reads it and publishes `geiger`, `gnss` and `board` to
+On the Pi, `sensor_drivers/external_board_bridge.py` reads it, or the data of the board's own firmware (below), and publishes `geiger`, `gnss` and `board` to
 `habitat/sensors/<sensor>/exterior`.
 
 - **Geiger:** counted on an interrupt, with a 150 µs dead time so one tube pulse counts once. CPM is taken over a
@@ -33,21 +33,48 @@ On the Pi, `sensor_drivers/external_board_bridge.py` reads it and publishes `gei
   - A stuck I2C bus is freed by clocking SCL.
   - Wi-Fi reconnects by itself, and USB output continues without it.
 
-## ⚠ Wiring review: check before powering
+Wiring as built (tested): both modules on the 5 V rail from VIN, the 220 µF across the 5 V rail. Keep the
+GNSS antenna under open sky and the Geiger tube's HV section (≈400 V) enclosed.
 
-1. **5 V on the ESP32's pins.** Both modules are powered from VIN (5 V), and ESP32 GPIOs are **not 5 V tolerant**.
-   If a module's I2C pull-ups or pulse output go to its supply, GPIO21, GPIO22 and GPIO4 see 5 V. That slowly
-   damages the ESP32 and makes I2C unreliable.
-   - **Best fix:** power both modules from the ESP32's **3V3** pin instead. Both are specified for 3.3–5 V.
-   - **Or measure:** with the board powered and idle, SDA and SCL to GND must read ≤ 3.3 V. For the Geiger
-     output, put a scope on it, or use a 10 k / 20 k divider.
-2. **Capacitor polarity:** the stripe (−) goes to GND. A reversed electrolytic can burst. 25 V is ample for 5 V.
-3. **The Geiger board has about 400 V on the tube.** Don't touch the tube ends or the HV section while it's
-   powered. Mount it in an enclosure.
-4. **Placement:** keep the GNSS antenna away from the buck converter's coil and the ESP32 antenna, and give
-   it open sky.
+## Connect it to the Pi 5 and IMM-OS
 
-## Flash (from the Pi)
+**Option A: keep the firmware already on the board** (its own Wi-Fi dashboard). Nothing to flash:
+the Pi reads the same data your dashboard shows.
+
+1. The board and the Pi on the same Wi-Fi/LAN. Give the board a DHCP reservation in the router.
+2. On the Pi, find what it serves:
+   ```bash
+   cd ~/imm-os-edge
+   .venv/bin/python sensor_drivers/external_board_bridge.py --probe http://<board-ip>/   # or --find
+   ```
+   It prints the values it recognises and the URL to use (`✓ use EXT_BOARD_URL=…`). If the dashboard page
+   loads its data by script, the probe finds that data URL in the page. If a value is missing (an unusual
+   name), map it: `EXT_BOARD_MAP="cpm=geiger.clicks,lat=gps.y"` in `/etc/imm-os/edge.env`.
+3. Add it to the node. From the MCC PC:
+   ```powershell
+   .\scripts\provision-pi.ps1 -PiUser pratham -PiHost node-rpi-01.local -Sensors "bme280_driver.py" -ExtBoard http://<board-ip>/
+   ```
+   Or on the Pi: `sudo scripts/setup-node.sh --ext-board http://<board-ip>/` (or `--ext-board find`).
+   Both check the board, write `EXT_BOARD_URL`, and start `external_board_bridge.py` as a service.
+4. Check: `sudo .venv/bin/python tools/bringup.py external`. Then in IMM-OS, the Sensors page shows
+   **Radiation** and **Position** cards for zone *exterior*. The Health page shows the radiation measurement.
+
+What the MCC does with it:
+- Dose-rate alarms: caution at 0.5, warning at 2.5, emergency at 25 µSv/h.
+- Board or Wi-Fi lost: the streams go *stale* after 15 s, and a *Sensor offline* caution is raised after
+  120 s. The driver reconnects by itself.
+- A flat zero count (dead tube) is flagged *stuck*.
+
+Tested end to end on the MCC stack, with a stand-in board serving a dashboard page and a `/data` JSON:
+- the probe found `/data`;
+- readings were stored in InfluxDB and appeared on the realtime feed;
+- 2.9 µSv/h raised the warning, and it returned to normal after;
+- unplugging the board raised the offline cautions, and the streams recovered on their own when it was back.
+
+**Option B: flash the IMM-OS firmware in this folder.** It adds a watchdog, I2C bus recovery, GNSS UTC, the
+reset reason and a warm-up flag. It replaces the dashboard firmware, but has its own page at `http://<board-ip>/`.
+
+### Flash (from the Pi)
 
 ```bash
 cd ~/imm-os-edge && ./scripts/flash-esp32.sh external
@@ -57,7 +84,7 @@ cd ~/imm-os-edge && ./scripts/flash-esp32.sh external
 `http://<board-ip>/`. It needs the board on a Pi USB port. When the internal board is also on USB, set
 `EXT_BOARD_PORT=/dev/serial/by-id/...` first so the right one is flashed.
 
-## Wi-Fi (stored on the board, never in code or files)
+### Wi-Fi (stored on the board, never in code or files)
 
 Over USB, one command at a time:
 

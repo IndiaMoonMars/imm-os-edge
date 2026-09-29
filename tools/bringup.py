@@ -58,6 +58,7 @@ class Sensor:
     i2c: List[int] = field(default_factory=list)
     uart: bool = False
     usb: bool = False                         # ESP32 sensor board on a USB port
+    net: bool = False                         # external board: EXT_BOARD_URL (Wi-Fi) or EXT_BOARD_PORT
     timeout_s: float = 20.0
     args: List[str] = field(default_factory=list)
     tip: str = ""                             # sanity check against a reference
@@ -101,6 +102,12 @@ def sensors() -> Dict[str, Sensor]:
                             "O₂ 20.9 % after CAL_O2 in fresh air; MQ-4 ppm only after 3 min warm-up and "
                             "CAL_MQ4 in clean air (esp32_bridge.py --send CAL_MQ4); rotate the board until imu_calib is 3; "
                             "every value checked one by one, with hands-on tests: tools/verify_esp32.py"),
+        "external": Sensor("sensor_drivers/external_board_bridge.py",
+                           {"cpm": (1, 5000), "usv_h": (0.005, 1.0), "sats": (0, 64), "lat": (-90, 90), "lon": (-180, 180)},
+                           net=True, timeout_s=30, count=12,
+                           tip="Geiger: background is ~15–45 CPM (0.1–0.3 µSv/h); a closed tube sees it everywhere. "
+                               "GNSS: the antenna needs open sky, a first fix takes minutes (lat/lon missing until then). "
+                               "Board not found: external_board_bridge.py --find, or --probe http://<board-ip>/"),
         "sysmon": Sensor("sensor_drivers/sysmon_driver.py", {"cpu_temp": (0, 85), "undervolt": (0, 0), "throttled": (0, 0)},
                          args=["--interval", "2"], timeout_s=15, simulated=True,
                          tip="undervolt=1 means the power supply is too weak (Pi 5: use the 27 W 5 V/5 A supply)"),
@@ -329,6 +336,15 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
             return 1
         r.ok(f"ESP32 on {port}")
 
+    if sensor.net:
+        url, port = os.getenv("EXT_BOARD_URL", ""), os.getenv("EXT_BOARD_PORT", "")
+        if not (url or port):
+            r.fail("EXT_BOARD_URL is not set: find the board with sensor_drivers/external_board_bridge.py --find, "
+                   "then put EXT_BOARD_URL=http://<board-ip>/… in /etc/imm-os/edge.env")
+            print(f"\n{name}: tell the Pi where the board is first.")
+            return 1
+        r.ok(f"external board at {url or port}")
+
     if sensor.chip_id:
         value, part = identify(open_i2c(), *sensor.chip_id)
         if value is None or value not in sensor.chip_id[2] or "!" in part:
@@ -387,7 +403,7 @@ def main(argv=None) -> int:
 
     if args.list:
         for name, s in sorted(known.items()):
-            bus = ", ".join(f"I2C 0x{a:02x}" for a in s.i2c) or ("UART" if s.uart else "on-board")
+            bus = ", ".join(f"I2C 0x{a:02x}" for a in s.i2c) or ("UART" if s.uart else "USB" if s.usb else "Wi-Fi or USB" if s.net else "on-board")
             print(f"  {name:9} {bus:18} {s.driver}")
         return 0
 
@@ -437,6 +453,8 @@ def connected(sensor: Sensor, found_i2c, uart_present: bool) -> bool:
     """Is this sensor's hardware visible? (Doesn't prove it works; bringup() does that.)"""
     if sensor.usb:
         return bool(esp32_port())
+    if sensor.net:
+        return bool(os.getenv("EXT_BOARD_URL") or os.getenv("EXT_BOARD_PORT"))
     if sensor.uart:
         return uart_present
     return all(a in found_i2c for a in sensor.i2c)
