@@ -72,11 +72,11 @@ def test_every_sensor_decoded(sim, tmp_path):
                               "grav_ms2": 9.80,             # |(0, 0.30, 9.80)| m/s²
                               "mag_ut": 40.7,               # |(30, 23, -15)| µT
                               "gyro_dps": 2.29,             # |(1, -2, 0.5)| °/s
-                              "temp": -3, "calib_gyro": 3, "calib_acc": 3, "calib_mag": 3}
+                              "temp": -3, "calib_gyro": 3, "calib_acc": 3, "calib_mag": 3, "cal_restored": 0}
     assert "# bno055 self-test: accel=pass mag=pass gyro=pass mcu=pass" in notes
     assert last["o2"]["o2_pct"] == pytest.approx(20.9 / 120 * 110.5, abs=0.01)   # default key when uncalibrated
     # 620 mV × 2.0 divider; Rs/RL = (5000 - 1240) / 1240; no ppm yet
-    assert last["mq4"] == {"vout_mv": 1240, "rs_rl": 3.032, "warming": 1, "calibrated": 0}
+    assert last["mq4"] == {"vout_mv": 1240, "rs_rl": 3.032, "warming": 1, "calibrated": 0, "warm_left_s": 172}
 
 
 def test_bno055_self_test_and_calibration_parts(sim, tmp_path):
@@ -91,12 +91,12 @@ def test_scd40_every_5_s_with_crc_checked_words(sim, tmp_path):
     scd = [d["scd40"] for d in data if "scd40" in d]
     assert len(scd) == 2                                                          # one per 5 s measurement
     assert scd[0] == {"co2_ppm": 612, "temp": pytest.approx(-45 + 175 * 26000 / 65535, abs=0.01),
-                      "hum": pytest.approx(100 * 26214 / 65535, abs=0.01)}
+                      "hum": pytest.approx(100 * 26214 / 65535, abs=0.01), "asc": 1}       # factory: self-calibration on
 
 
 def test_missing_sensor_left_out_then_found(sim, tmp_path):
     data, notes = sim("remove bno\n" + BASE + "run 5\nadd bno\nrun 30\n", tmp_path)
-    assert "bno055=none" in notes[1]
+    assert "bno055=none" in next(n for n in notes if n.startswith("# sensors:"))
     assert "bno055" not in data[0] and "bme280" in data[0]
     assert "bno055" in data[-1]                                                   # re-probed within 30 s
 
@@ -219,3 +219,55 @@ def test_o2_reports_whether_it_was_calibrated(sim, tmp_path):
 def test_missing_sensor_probes_are_not_i2c_errors(sim, tmp_path):
     data, _ = sim("remove bno\nremove o2\n" + BASE + "run 65\n", tmp_path)     # two re-probes
     assert [d["board"]["i2c_err"] for d in data if "board" in d][-1] == 0
+
+
+# ── Warm-up only where physics needs it ─────────────────────────────
+
+def test_mq4_warm_up_countdown_and_none_after_a_reset_that_kept_the_heater_on(sim, tmp_path):
+    data, notes = sim(BASE + "run 3\n", tmp_path)                    # power-on
+    assert "# mq4: heater warming up for 3 min" in notes
+    first, last = data[0]["mq4"], data[-1]["mq4"]
+    assert first["warming"] == 1 and 178 <= first["warm_left_s"] <= 180
+    assert last["warm_left_s"] == first["warm_left_s"] - 2
+    for reason in (6, 4, 3, 2):                                     # watchdog, crash, software, EN button
+        data, notes = sim(BASE + f"run 200\nresetreason {reason}\nreset\nrun 2\n", tmp_path)
+        assert "# mq4: heater stayed powered through this reset: no warm-up" in notes
+        assert data[-1]["mq4"]["warming"] == 0 and "warm_left_s" not in data[-1]["mq4"]
+    data, _ = sim(BASE + "run 200\nresetreason 9\nreset\nrun 2\n", tmp_path)   # brownout: the heater cooled
+    assert data[-1]["mq4"]["warming"] == 1
+
+
+def test_mq4_calibration_right_after_a_watchdog_reset(sim, tmp_path):
+    data, notes = sim("resetreason 6\n" + BASE + "run 2\nsend CAL_MQ4\nrun 12\n", tmp_path)
+    assert any(n.startswith("# CAL_MQ4: R0 stored") for n in notes)
+    assert "ch4_ppm" in data[-1]["mq4"]
+
+
+def test_bno055_calibration_stored_and_restored_after_restart(sim, tmp_path):
+    offsets = " ".join(str(v) for v in range(10, 32))                # 22 bytes the fusion found
+    data, notes = sim(BASE + f"bnoset {offsets}\nrun 3\nresetreason 6\nreset\nbnooffsets\nrun 2\n", tmp_path)
+    assert sum(n == "# bno055: fully calibrated: calibration stored, restored at every start" for n in notes) == 2  # once per start
+    restored = next(n for n in notes if n.startswith("BNOOFF")).split()[1:]
+    assert restored == offsets.split()                               # written back after the chip's own reset
+    assert data[-1]["bno055"]["cal_restored"] == 1
+    data, notes = sim(BASE + "run 2\nsend CAL_BNO_CLEAR\nrun 1\n", tmp_path)
+    assert "# CAL_BNO_CLEAR: stored BNO055 calibration forgotten" in notes
+
+
+def test_bno055_not_stored_until_fully_calibrated(sim, tmp_path):
+    data, notes = sim(BASE.replace("0 255", "0 254") + "run 5\nreset\nrun 1\n", tmp_path)   # magnetometer 2/3
+    assert not any("calibration stored" in n for n in notes)
+    assert data[-1]["bno055"]["cal_restored"] == 0
+
+
+def test_scd40_forced_recalibration_turns_self_calibration_off(sim, tmp_path):
+    _, notes = sim(BASE + "run 10\nsend CAL_CO2\nrun 1\n", tmp_path)
+    assert "# CAL_CO2: let the SCD40 run 3 min in fresh air first" in notes
+    data, notes = sim(BASE + "run 185\nsend CAL_CO2 430\nrun 12\nscdstate\nsend CAL_CO2 90\nrun 1\n", tmp_path)
+    assert "# CAL_CO2: SCD40 set to 430 ppm (correction -182 ppm); automatic self-calibration off" in notes  # it read 612
+    assert "SCD asc=0 persisted=0 frc=430 running=1" in notes        # stored in the sensor; measuring again
+    assert [d["scd40"] for d in data if "scd40" in d][-1]["asc"] == 0
+    assert any("ppm must be 400-2000" in n for n in notes)
+    _, notes = sim(BASE + "run 185\nsend CAL_CO2\nrun 2\nsend ASC_ON\nrun 6\nscdstate\n", tmp_path)
+    assert "# ASC_ON: SCD40 automatic self-calibration on" in notes
+    assert "SCD asc=1 persisted=1 frc=420 running=1" in notes

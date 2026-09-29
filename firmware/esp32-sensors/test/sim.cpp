@@ -19,6 +19,9 @@
 //     resetreason R               esp_reset_reason() at the next boot (1 power-on, 6 task watchdog, 9 brownout)
 //     i2cstuck N                  a device holds SDA low until SCL is clocked N times
 //     wdt                         print the task watchdog's longest gap between feeds (ms) and its timeout
+//     scdstate                    print the SCD40's self-calibration setting, last forced-recalibration target
+//     bnoset B0 … B21             the BNO055's calibration offsets (what the fusion found; 0x55-0x6A)
+//     bnooffsets                  print the BNO055's calibration offset registers
 // Everything the firmware prints goes to stdout.
 #include <fstream>
 #include <iostream>
@@ -36,6 +39,7 @@ uint32_t wdt_timeout_s = 0, wdt_last_feed = 0, wdt_max_gap = 0;
 bool wdt_added = false;
 std::string rx, tx;
 std::map<std::string, float> nvs;
+std::map<std::string, std::vector<uint8_t>> nvsb;
 std::map<uint8_t, I2CDevice*> bus;
 }
 HardwareSerial Serial;
@@ -110,6 +114,8 @@ struct Bme280Dev : RegDevice {
 
 struct Scd40Dev : I2CDevice {
   bool running = false;
+  int asc = 1, ascPersisted = 1, frcTarget = 0, persists = 0;
+  uint32_t runningSince = 0;
   uint32_t nextReady = 0;
   uint16_t words[3] = {0, 0, 0};
   std::vector<uint8_t> reply;
@@ -123,8 +129,16 @@ struct Scd40Dev : I2CDevice {
   void write(const std::vector<uint8_t>& b) override {
     const uint16_t cmd = (uint16_t)(b[0] << 8 | b[1]);
     reply.clear();
-    if (cmd == 0x21B1 && !running) { running = true; nextReady = sim::now_ms + 5000; }
+    const uint16_t arg = b.size() >= 4 ? (uint16_t)(b[2] << 8 | b[3]) : 0;
+    if (cmd == 0x21B1 && !running) { running = true; runningSince = sim::now_ms; nextReady = sim::now_ms + 5000; }
     else if (cmd == 0x3F86) running = false;
+    else if (cmd == 0x2313 && !running) pushWord((uint16_t)asc);
+    else if (cmd == 0x2416 && !running && b.size() == 5) asc = arg ? 1 : 0;
+    else if (cmd == 0x3615 && !running) { ascPersisted = asc; persists++; }
+    else if (cmd == 0x362F && !running && b.size() == 5) {       // forced recalibration: reference - current reading
+      frcTarget = arg;
+      pushWord((uint16_t)(0x8000 + (int)arg - (int)words[0]));
+    }
     else if (cmd == 0xE4B8) pushWord(ready() ? 0x8006 : 0x8000);
     else if (cmd == 0xEC05 && ready()) { for (uint16_t w : words) pushWord(w); nextReady = sim::now_ms + 5000; }
   }
@@ -136,6 +150,15 @@ struct Scd40Dev : I2CDevice {
 
 struct Bno055Dev : RegDevice {
   Bno055Dev() { reg[0x00] = 0xA0; reg[0x36] = 0x0F; }          // chip ID; self-test all passed
+  bool accept(uint8_t r, uint8_t) override {                   // offsets are writable in CONFIG mode only
+    return !(r >= 0x55 && r <= 0x6A && (reg[0x3D] & 0x0F) != 0);
+  }
+  void stored(uint8_t r, uint8_t v) override {
+    if (r == 0x3F && (v & 0x20)) {                             // system reset: offsets back to zero, CONFIG mode
+      for (int i = 0x55; i <= 0x6A; i++) reg[i] = 0;
+      reg[0x3D] = 0; reg[0x3F] = 0;
+    }
+  }
 };
 
 struct Sen0322Dev : RegDevice {};
@@ -197,11 +220,16 @@ int main(int, char** argv) {
     else if (op == "o2user") std::cout << "O2USER " << o2Dev.writes[0x08] << "\n";
     else if (op == "resetreason") ss >> sim::reset_reason;
     else if (op == "i2cstuck") ss >> sim::sda_stuck_clocks;
+    else if (op == "scdstate") std::cout << "SCD asc=" << scdDev.asc << " persisted=" << scdDev.ascPersisted
+                                          << " frc=" << scdDev.frcTarget << " running=" << scdDev.running << "\n";
+    else if (op == "bnooffsets") { std::cout << "BNOOFF"; for (int i = 0x55; i <= 0x6A; i++) std::cout << " " << (int)bnoDev.reg[i]; std::cout << "\n"; }
+    else if (op == "bnoset") { for (int i = 0x55; i <= 0x6A; i++) { int v; ss >> v; bnoDev.reg[i] = (uint8_t)v; } }
     else if (op == "wdt") std::cout << "WDT " << sim::wdt_max_gap << " " << sim::wdt_timeout_s * 1000 << " " << sim::wdt_added << "\n";
     else if (op == "reset") {
       bme.addr = 0; bmeFails = 0; bmeResets = 0; bmeSeenOk = false; scdZeroes = 0; scdFound = false; bnoAddr = 0; o2Addr = 0; mq4R0 = 0; mq4CalLeft = 0; mq4CalSum = 0;
       lastSample = lastProbe = lastBoard = lastRecovery = 0; cmdLen = 0; sim::now_ms = 0; scdDev.running = scdDev.running;   // the SCD40 keeps measuring
       i2cErr = 0; i2cStreak = 0; i2cRecoveries = 0; sim::wdt_added = false; sim::wdt_max_gap = 0;
+      bnoCalRestored = bnoCalSaved = false; scdAsc = -1; scdStartedMs = 0;
       setup();
     }
     flush();

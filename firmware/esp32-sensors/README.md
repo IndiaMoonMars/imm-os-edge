@@ -114,15 +114,17 @@ shows the same automatic checks live under each node.
 ## Calibration
 
 Send these commands with `pio device monitor` on the PC, or from the Pi with
-`sensor_drivers/esp32_bridge.py --send CAL_MQ4`.
+`sensor_drivers/esp32_bridge.py --send CAL_MQ4` (quote commands with an argument: `--send "CAL_CO2 430"`).
+Before a mission, do them in the order given in imm-os-docs `mission-operations.md`.
 
 - **MQ-4 (methane):**
-  - Give a new sensor 24–48 h of burn-in first; after every power-up it also needs 3 minutes to warm up.
+  - Give a new sensor 24–48 h of burn-in first. After a real power-on (or a brownout) it needs 3 minutes to warm up; the board reports `warm_left_s` for the countdown. After a watchdog, crash, software or EN-button reset the heater kept its power, so there is no warm-up.
   - Then, in clean outdoor air, send `CAL_MQ4`. It averages 10 s of readings and stores R0 in flash, where it survives power-off.
   - Until then, the board reports only the raw voltage.
   - ppm uses the datasheet curve for methane (ppm = 1012.7 × (Rs/R0)^−2.786, with Rs/R0 = 4.4 in clean air). Treat it as an estimate within the sensor's 200–10,000 ppm range, and check it against a reference gas detector.
 - **SEN0322 (oxygen):** in fresh outdoor air, send `CAL_O2`. The sensor then treats that reading as 20.9 %.
-- **BNO055:** it calibrates itself as it moves. `imu_calib` (and `calib_gyro`, `calib_acc`, `calib_mag`) go from 0 to 3, and 3 means fully calibrated. Rotate the board slowly through a few orientations to get there.
+- **SCD40 (CO₂):** after 3 min in fresh outdoor air, send `CAL_CO2` (or `CAL_CO2 430` for a known level). This is a forced recalibration to 420 ppm, and it turns the sensor's automatic self-calibration off. That self-calibration needs about 7 days of regular fresh air, as long as a mission, and would drift instead. Both are stored in the sensor; the board reports `asc` (1 on, 0 off). `ASC_ON` turns it back on after the mission.
+- **BNO055:** it calibrates itself as it moves. `imu_calib` (and `calib_gyro`, `calib_acc`, `calib_mag`) go from 0 to 3, and 3 means fully calibrated. Rotate the board slowly through a few orientations to get there. Once all four read 3, the board stores the calibration offsets in flash and writes them back at every start (`cal_restored: 1`), so a restart doesn't lose it. `CAL_BNO_CLEAR` forgets them.
 - `STATUS` lists which sensors were found and the MQ-4 calibration.
 
 ## Test on a PC (no hardware)

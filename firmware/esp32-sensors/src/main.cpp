@@ -14,12 +14,15 @@
 //
 // Output, one line per second (sections only for sensors that answered):
 //   {"ms":1000,"bme280":{"temp":24.51,"hum":41.20,"pres":1008.42},
-//    "scd40":{"co2_ppm":612,"temp":25.10,"hum":40.30},             (every 5 s, when new)
+//    "scd40":{"co2_ppm":612,"temp":25.10,"hum":40.30,"asc":0},     (every 5 s, when new;
+//                                                                    asc: automatic self-calibration on/off)
 //    "bno055":{"heading_deg":..,"roll_deg":..,"pitch_deg":..,"lin_acc_ms2":..,"imu_calib":3,
 //              "grav_ms2":9.80,"mag_ut":42.1,"gyro_dps":0.1,"temp":26,
-//              "calib_gyro":3,"calib_acc":3,"calib_mag":3},
+//              "calib_gyro":3,"calib_acc":3,"calib_mag":3,"cal_restored":1},
+//                                                   (cal_restored: offsets written back from flash at start)
 //    "o2":{"o2_pct":20.87,"calibrated":1},                          (calibrated: CAL_O2 was done)
 //    "mq4":{"vout_mv":1240,"rs_rl":3.03,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1},
+//                                                   (while warming: "warm_left_s":123, no ch4_ppm)
 //    "board":{"uptime_s":10,"reset_reason":1,"boot_count":7,"i2c_err":0,"bme_resets":0}}  (every 10 s)
 // Lines starting with '#' are diagnostics.
 //
@@ -30,10 +33,22 @@
 //   - I2C bus recovery: when every transaction fails for a while (a device holding SDA low),
 //     SCL is clocked 9 times to free the bus, a STOP is sent and the sensors are set up again
 //
+// Warm-up, only where physics needs it:
+//   - MQ-4: 3 min heater warm-up after a real power-on (or brownout). After a watchdog, crash,
+//     software or EN-button reset the heater never lost its 5 V, so there is no warm-up.
+//   - BNO055: once fully calibrated (3/3/3/3) its offsets are stored in flash, and written back
+//     at every start: no figure-8s after a restart (the fusion still refines them as it runs).
+//   - SCD40: CAL_CO2 (forced recalibration in fresh air) turns automatic self-calibration off:
+//     it needs ~7 days of regular fresh air, as long as the mission, and would drift instead.
+//
 // Commands (a line sent to the board):
-//   STATUS   which sensors were found, MQ-4 calibration
-//   CAL_MQ4  in clean air, after warm-up: store the MQ-4's R0 (flash, survives power-off)
-//   CAL_O2   in fresh outdoor air: tell the SEN0322 that it reads 20.9 %
+//   STATUS         which sensors were found, MQ-4 calibration
+//   CAL_MQ4        in clean air, after warm-up: store the MQ-4's R0 (flash, survives power-off)
+//   CAL_O2         in fresh outdoor air: tell the SEN0322 that it reads 20.9 %
+//   CAL_CO2 [ppm]  after 3 min in fresh outdoor air: SCD40 forced recalibration to ppm (default 420),
+//                  and automatic self-calibration off (stored in the sensor)
+//   ASC_ON         automatic self-calibration back on (after the mission)
+//   CAL_BNO_CLEAR  forget the stored BNO055 calibration
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Wire.h>
@@ -70,6 +85,7 @@ static const float MQ4_VC_MV = 5000.0f;          // module supply
 static const float MQ4_CLEAN_AIR_RATIO = 4.4f;   // Rs/R0 in clean air (datasheet sensitivity curve)
 static const float MQ4_A = 1012.7f, MQ4_B = -2.786f;   // CH4: ppm = A * (Rs/R0)^B (curve fit)
 static const uint32_t MQ4_WARMUP_MS = 180000;    // after power-up; 24-48 h burn-in before calibrating
+static uint32_t mq4WarmupMs = MQ4_WARMUP_MS;     // 0 after a reset that left the heater powered (setup)
 static const int MQ4_CAL_SAMPLES = 10;
 
 // ── I2C helpers ──────────────────────────────────────────────────────
@@ -239,6 +255,12 @@ static bool scdCommand(uint16_t cmd) {
   return writeBytes(SCD40_ADDR, b, 2);
 }
 
+static bool scdCommandArg(uint16_t cmd, uint16_t arg) {
+  uint8_t b[5] = {(uint8_t)(cmd >> 8), (uint8_t)cmd, (uint8_t)(arg >> 8), (uint8_t)arg, 0};
+  b[4] = crc8(&b[2], 2);
+  return writeBytes(SCD40_ADDR, b, 5);
+}
+
 static bool scdReadWords(uint16_t* words, int n) {
   uint8_t buf[9];
   if (!readBytes(SCD40_ADDR, buf, n * 3)) return false;
@@ -249,14 +271,66 @@ static bool scdReadWords(uint16_t* words, int n) {
   return true;
 }
 
+static int scdAsc = -1;                                         // automatic self-calibration: 1 on, 0 off, -1 unknown
+static uint32_t scdStartedMs = 0;
+
 static bool scdInit() {
   scdFound = false;
   if (!probe(SCD40_ADDR)) return false;
   scdCommand(0x3F86);                                           // stop_periodic_measurement (may still run after an ESP32 reset)
   delay(500);
+  uint16_t w;
+  if (scdCommand(0x2313)) {                                     // get_automatic_self_calibration_enabled (idle only)
+    delay(1);
+    if (scdReadWords(&w, 1)) scdAsc = w ? 1 : 0;
+  }
   if (!scdCommand(0x21B1)) return false;                        // start_periodic_measurement: one reading every 5 s
+  scdStartedMs = millis();
   scdFound = true;
   return true;
+}
+
+// Forced recalibration (datasheet 3.7.1): measured ≥3 min in air of known CO2, then idle.
+// Automatic self-calibration goes off and both are stored in the sensor (persist_settings).
+static void scdForcedCal(int ppm) {
+  char m[140];
+  if (!scdFound) { diag("CAL_CO2: no SCD40 found"); return; }
+  if (millis() - scdStartedMs < 180000) { diag("CAL_CO2: let the SCD40 run 3 min in fresh air first"); return; }
+  scdCommand(0x3F86);
+  delay(500);
+  uint16_t w = 0xFFFF;
+  if (scdCommandArg(0x362F, (uint16_t)ppm)) {                   // perform_forced_recalibration
+    delay(400);
+    if (!scdReadWords(&w, 1)) w = 0xFFFF;
+  }
+  if (w == 0xFFFF) {
+    diag("CAL_CO2: the SCD40 refused (it must have measured for 3 min just before)");
+  } else {
+    scdCommandArg(0x2416, 0);                                   // automatic self-calibration off
+    delay(1);
+    scdCommand(0x3615);                                         // persist_settings
+    delay(800);
+    scdAsc = 0;
+    snprintf(m, sizeof m, "CAL_CO2: SCD40 set to %d ppm (correction %+d ppm); automatic self-calibration off",
+             ppm, (int)w - 0x8000);
+    diag(m);
+  }
+  scdCommand(0x21B1);
+  scdStartedMs = millis();
+}
+
+static void scdAscOn() {
+  if (!scdFound) { diag("ASC_ON: no SCD40 found"); return; }
+  scdCommand(0x3F86);
+  delay(500);
+  scdCommandArg(0x2416, 1);
+  delay(1);
+  scdCommand(0x3615);
+  delay(800);
+  scdAsc = 1;
+  scdCommand(0x21B1);
+  scdStartedMs = millis();
+  diag("ASC_ON: SCD40 automatic self-calibration on");
 }
 
 // true and fills the values only when a new measurement is ready
@@ -276,6 +350,10 @@ static bool scdRead(float& co2, float& temp, float& hum) {
 
 // ── BNO055 (Bosch: 9-axis fusion in NDOF mode) ───────────────────────
 static uint8_t bnoAddr = 0, bnoSelfTest = 0;                    // ST_RESULT: bit 0 acc, 1 mag, 2 gyro, 3 MCU (1 = passed)
+static const uint8_t BNO_OFFSETS = 0x55;                        // ACC_OFFSET_X_LSB … MAG_RADIUS_MSB
+static const int BNO_OFFSETS_LEN = 22;
+Preferences bnoPrefs;                                           // "imm-bno": the calibration offsets
+static bool bnoCalRestored = false, bnoCalSaved = false;
 
 static bool bnoInit() {
   bnoAddr = 0;
@@ -294,6 +372,11 @@ static bool bnoInit() {
     writeReg(a, 0x07, 0x00);
     writeReg(a, 0x3F, 0x00);
     writeReg(a, 0x3B, 0x00);                                    // units: m/s², degrees, °C
+    uint8_t off[1 + BNO_OFFSETS_LEN];                           // calibration from an earlier run (CONFIG mode only)
+    off[0] = BNO_OFFSETS;
+    bnoCalRestored = bnoPrefs.getBytesLength("off") == BNO_OFFSETS_LEN &&
+                     bnoPrefs.getBytes("off", off + 1, BNO_OFFSETS_LEN) == BNO_OFFSETS_LEN &&
+                     writeBytes(a, off, sizeof off);
     writeReg(a, 0x3D, 0x0C);                                    // NDOF fusion
     delay(20);
     bnoAddr = a;
@@ -317,6 +400,20 @@ struct BnoReading {
 static float norm3(const uint8_t* b, float lsb) {
   const float x = le16(&b[0]) / lsb, y = le16(&b[2]) / lsb, z = le16(&b[4]) / lsb;
   return sqrtf(x * x + y * y + z * z);
+}
+
+// Fully calibrated: store the offsets (once per start; read in CONFIG mode, then back to NDOF)
+static void bnoSaveCalibration() {
+  uint8_t off[BNO_OFFSETS_LEN];
+  writeReg(bnoAddr, 0x3D, 0x00);
+  delay(25);
+  const bool ok = readRegs(bnoAddr, BNO_OFFSETS, off, sizeof off);
+  writeReg(bnoAddr, 0x3D, 0x0C);
+  delay(20);
+  if (ok && bnoPrefs.putBytes("off", off, sizeof off) == sizeof off) {
+    bnoCalSaved = true;
+    diag("bno055: fully calibrated: calibration stored, restored at every start");
+  }
 }
 
 static bool bnoRead(BnoReading& r) {
@@ -459,12 +556,22 @@ static void handleCommand() {
   if (strcmp(cmd, "STATUS") == 0) {
     status();
   } else if (strcmp(cmd, "CAL_MQ4") == 0) {
-    if (millis() < MQ4_WARMUP_MS) diag("CAL_MQ4: still warming up; try again after 3 min");
+    if (millis() < mq4WarmupMs) diag("CAL_MQ4: still warming up; try again after 3 min");
     else { mq4CalLeft = MQ4_CAL_SAMPLES; mq4CalSum = 0; diag("CAL_MQ4: sampling clean air for 10 s"); }
   } else if (strcmp(cmd, "CAL_O2") == 0) {
     diag(o2Calibrate() ? "CAL_O2: SEN0322 set to 20.9 % (fresh air)" : "CAL_O2: no SEN0322 found");
+  } else if (strncmp(cmd, "CAL_CO2", 7) == 0 && (cmd[7] == 0 || cmd[7] == ' ')) {
+    const int ppm = cmd[7] ? atoi(cmd + 8) : 420;
+    if (ppm < 400 || ppm > 2000) diag("CAL_CO2: ppm must be 400-2000 (fresh outdoor air: 420)");
+    else scdForcedCal(ppm);
+  } else if (strcmp(cmd, "ASC_ON") == 0) {
+    scdAscOn();
+  } else if (strcmp(cmd, "CAL_BNO_CLEAR") == 0) {
+    bnoPrefs.remove("off");
+    bnoCalRestored = bnoCalSaved = false;
+    diag("CAL_BNO_CLEAR: stored BNO055 calibration forgotten");
   } else if (cmdLen) {
-    diag("unknown command (STATUS, CAL_MQ4, CAL_O2)");
+    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, CAL_BNO_CLEAR)");
   }
   cmdLen = 0;
 }
@@ -484,8 +591,13 @@ void setup() {
   }
   prefs.begin("imm-mq4", false);
   mq4R0 = prefs.isKey("r0") ? prefs.getFloat("r0", 0) : 0;   // isKey: no "NOT_FOUND" error log before CAL_MQ4
+  bnoPrefs.begin("imm-bno", false);
+  // EN button (2), software (3), crash (4), watchdogs (5-7), deep sleep (8): the ESP32 restarted
+  // but the MQ-4 heater kept its 5 V, so it is still hot. Power-on (1), brownout (9), unknown: warm up.
+  mq4WarmupMs = resetReason >= 2 && resetReason <= 8 ? 0 : MQ4_WARMUP_MS;
   delay(800);                           // BNO055 boot time after power-up
   diag("IMM-OS ESP32 sensor board started");
+  diag(mq4WarmupMs ? "mq4: heater warming up for 3 min" : "mq4: heater stayed powered through this reset: no warm-up");
   findSensors();
   status();
   lastProbe = millis();
@@ -530,25 +642,29 @@ void loop() {
   }
   if (scdRead(a, b, c)) {
     // CO2 = 0 is impossible in air (the SCD40's range starts at 400 ppm): leave it out rather than publish it
-    if (a > 0) n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"co2_ppm\":%.0f,\"temp\":%.2f,\"hum\":%.2f}", a, b, c);
+    if (a > 0) n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"co2_ppm\":%.0f,\"temp\":%.2f,\"hum\":%.2f", a, b, c);
     else {
-      n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"temp\":%.2f,\"hum\":%.2f}", b, c);
+      n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"temp\":%.2f,\"hum\":%.2f", b, c);
       if (scdZeroes++ % 12 == 0) diag("scd40: CO2 reads 0, left out (normal for the first readings after start)");
     }
+    if (scdAsc >= 0) n += snprintf(line + n, sizeof line - n, ",\"asc\":%d", scdAsc);
+    n += snprintf(line + n, sizeof line - n, "}");
   }
-  if (bnoRead(bno))
+  if (bnoRead(bno)) {
+    if (!bnoCalSaved && bno.calSys == 3 && bno.calGyro == 3 && bno.calAcc == 3 && bno.calMag == 3) bnoSaveCalibration();
     n += snprintf(line + n, sizeof line - n,
                   ",\"bno055\":{\"heading_deg\":%.2f,\"roll_deg\":%.2f,\"pitch_deg\":%.2f,\"lin_acc_ms2\":%.2f,\"imu_calib\":%d,"
                   "\"grav_ms2\":%.2f,\"mag_ut\":%.1f,\"gyro_dps\":%.2f,\"temp\":%d,"
-                  "\"calib_gyro\":%d,\"calib_acc\":%d,\"calib_mag\":%d}",
+                  "\"calib_gyro\":%d,\"calib_acc\":%d,\"calib_mag\":%d,\"cal_restored\":%d}",
                   bno.heading, bno.roll, bno.pitch, bno.linAcc, bno.calSys, bno.grav, bno.mag, bno.gyro, bno.temp,
-                  bno.calGyro, bno.calAcc, bno.calMag);
+                  bno.calGyro, bno.calAcc, bno.calMag, bnoCalRestored ? 1 : 0);
+  }
   bool o2Cal = false;
   if (o2Read(a, o2Cal))
     n += snprintf(line + n, sizeof line - n, ",\"o2\":{\"o2_pct\":%.2f,\"calibrated\":%d}", a, o2Cal ? 1 : 0);
 
   const Mq4Reading mq = mq4Read();
-  const bool warming = now < MQ4_WARMUP_MS;
+  const bool warming = now < mq4WarmupMs;
   if (mq.ok) {
     if (mq4CalLeft > 0) {
       mq4CalSum += mq.rsRl;
@@ -566,7 +682,9 @@ void loop() {
       n += snprintf(line + n, sizeof line - n, ",\"rs_r0\":%.3f", ratio);
       if (!warming) n += snprintf(line + n, sizeof line - n, ",\"ch4_ppm\":%.1f", MQ4_A * powf(ratio, MQ4_B));
     }
-    n += snprintf(line + n, sizeof line - n, ",\"warming\":%d,\"calibrated\":%d}", warming ? 1 : 0, mq4R0 > 0 ? 1 : 0);
+    n += snprintf(line + n, sizeof line - n, ",\"warming\":%d,\"calibrated\":%d", warming ? 1 : 0, mq4R0 > 0 ? 1 : 0);
+    if (warming) n += snprintf(line + n, sizeof line - n, ",\"warm_left_s\":%lu", (unsigned long)((mq4WarmupMs - now + 999) / 1000));
+    n += snprintf(line + n, sizeof line - n, "}");
   }
   if (now - lastBoard >= BOARD_MS || lastBoard == 0) {
     lastBoard = now;

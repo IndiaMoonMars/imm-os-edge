@@ -23,7 +23,10 @@ temperatures differ (the SCD40 warms itself): a check that both humidity sensors
 
 Lines starting with '#' are the board's diagnostics (stderr as {"info": ...}).
 
-  --send CMD    send STATUS, CAL_MQ4 or CAL_O2 to the board and show its replies
+  --send CMD    send a command to the board and show its replies: STATUS, CAL_MQ4, CAL_O2,
+                CAL_CO2 [ppm] (SCD40 forced recalibration in fresh air; self-calibration off),
+                ASC_ON, CAL_BNO_CLEAR. While the service runs, a reply can also land in its journal
+                (journalctl -u imm-sensor-pipeline@esp32_bridge.py).
 Port: ESP32_PORT, else the first CP210x/CH340 USB-serial device. Modes: stdout | mqtt | both
 """
 import argparse
@@ -40,14 +43,14 @@ from mqtt_publisher import MODES, make_publisher  # noqa: E402
 BAUD_RATE = 115200
 FIELDS = {
     "bme280": ("temp", "hum", "pres"),
-    "scd40": ("co2_ppm", "temp", "hum"),
+    "scd40": ("co2_ppm", "temp", "hum", "asc"),
     "o2": ("o2_pct", "calibrated"),
     "bno055": ("heading_deg", "roll_deg", "pitch_deg", "lin_acc_ms2", "imu_calib",
-               "grav_ms2", "mag_ut", "gyro_dps", "temp", "calib_gyro", "calib_acc", "calib_mag"),
-    "mq4": ("vout_mv", "rs_rl", "rs_r0", "ch4_ppm", "warming", "calibrated"),
+               "grav_ms2", "mag_ut", "gyro_dps", "temp", "calib_gyro", "calib_acc", "calib_mag", "cal_restored"),
+    "mq4": ("vout_mv", "rs_rl", "rs_r0", "ch4_ppm", "warming", "calibrated", "warm_left_s"),
     "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets"),
 }
-INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated",
+INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated", "warm_left_s", "cal_restored", "asc",
               "uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets"}
 DEW_POINT_SENSORS = ("bme280", "scd40")
 
@@ -165,7 +168,7 @@ def send(ser, command: str, listen_s: float = 13.0) -> int:
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=MODES, default="stdout")
-    parser.add_argument("--send", metavar="CMD", help="STATUS, CAL_MQ4 or CAL_O2")
+    parser.add_argument("--send", metavar="CMD", help="STATUS, CAL_MQ4, CAL_O2, CAL_CO2 [ppm], ASC_ON, CAL_BNO_CLEAR")
     args = parser.parse_args()
     port = esp32_port()
     if not port:

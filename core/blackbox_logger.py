@@ -2,7 +2,8 @@
 """
 IMM-OS Blackbox Logger
 Reads standard input stream (from encryption_layer.py) and continuously appends to a Protobuf binary file.
-Rotates files every hour. Deletes files older than 48 hours.
+Rotates files every hour. Deletes files older than IMM_BLACKBOX_RETENTION_H (default 216 h = 9 days:
+a whole 7-sol mission plus margin stays on the node; about 150 MB a day on a busy node).
 """
 
 import sys
@@ -16,7 +17,7 @@ import telemetry_pb2
 # Configuration
 STORAGE_DIR = os.getenv("IMM_BLACKBOX_DIR", "/var/lib/imm-os/blackbox")
 ROTATION_INTERVAL_SEC = 3600  # 1 hour
-RETENTION_HOURS = 48
+RETENTION_HOURS = float(os.getenv("IMM_BLACKBOX_RETENTION_H", "216"))
 
 def ensure_storage_dir():
     if not os.path.exists(STORAGE_DIR):

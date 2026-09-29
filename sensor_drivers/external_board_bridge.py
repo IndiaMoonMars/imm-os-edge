@@ -49,11 +49,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import watchdog  # noqa: E402   (mqtt_publisher is imported in main: --probe/--find need no paho)
 
 FIELDS = {
-    "geiger": ("cpm", "usv_h", "counts", "warming"),
+    "geiger": ("cpm", "usv_h", "counts", "warming", "window_s"),
     "gnss": ("fix", "sats", "lat", "lon", "alt_m", "sog_kn", "cog_deg"),
     "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "rssi_dbm"),
 }
-INT_FIELDS = {"counts", "warming", "fix", "sats", "uptime_s", "reset_reason", "boot_count", "i2c_err", "rssi_dbm"}
+INT_FIELDS = {"counts", "warming", "window_s", "fix", "sats", "uptime_s", "reset_reason", "boot_count", "i2c_err", "rssi_dbm"}
 
 
 def to_payloads(line: dict, now: float, zone: str):
