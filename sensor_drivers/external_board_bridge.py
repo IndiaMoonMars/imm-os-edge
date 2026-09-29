@@ -449,7 +449,16 @@ def port_users(port: str, proc="/proc") -> list:
     return users
 
 
-def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_users) -> tuple:
+def reset_board(ser, sleep=time.sleep):
+    """Restart the ESP32 through the DevKit's auto-reset circuit (EN low while RTS is on and DTR
+    off), as esptool does; IO0 stays high, so it boots the sketch, not the flasher."""
+    ser.dtr = False
+    ser.rts = True
+    sleep(0.12)
+    ser.rts = False
+
+
+def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_users, reset=False) -> tuple:
     """Read a USB serial port at the usual speeds and show what the board prints.
     Returns (baud, reading) for the speed whose output has GNSS/Geiger values, else (0, None)."""
     opener = opener or (lambda p, b: open_serial(p, b, exclusive=True))
@@ -480,6 +489,9 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
                 out(f"  ✗ {port}: {msg}")
             return 0, None
         lines, col, best = [], LineCollector(), None
+        if reset and baud == 115200:
+            out("  · restarting the ESP32 over USB (its start-up message comes at 115200 baud) …")
+            reset_board(ser)
         end = time.monotonic() + seconds
         try:
             while time.monotonic() < end:
@@ -499,12 +511,17 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
         if not lines:
             out(f"  · {baud} baud: nothing printed in {seconds:g} s")
             continue
-        if readable < 0.9:
+        if readable < 0.9 and not any("rst:0x" in ln for ln in lines):     # reset noise is fine
             out(f"  · {baud} baud: unreadable (wrong speed)")
             continue
         out(f"  · {baud} baud, {len(lines)} lines, for example:")
         for ln in lines[-6:]:
             out(f"      {ln[:110]}")
+        if reset and baud == 115200 and any("rst:0x" in ln or "boot:0x" in ln for ln in lines) \
+                and not (best and score(best)):
+            out("  · the USB link works (the ESP32 start-up message came through), but after it the sketch "
+                "prints no readings on USB. Read the board over Wi-Fi instead (--find / --probe http://<ip>/)")
+            return 0, None
         if any('"bme280"' in ln or '"scd40"' in ln or '"bno055"' in ln for ln in lines):
             out("  · this is the INTERNAL sensor board (BME280/SCD40/…), not the external one")
             return 0, None
@@ -514,8 +531,12 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
             return baud, best
         out("  ✗ readable, but no GNSS or Geiger values recognised in it")
         return 0, None
-    out(f"  ✗ {port}: the board printed nothing readable. Its firmware may only serve Wi-Fi (use --find), "
-        "or it needs a reset (press EN on the ESP32 while listening)")
+    if reset:
+        out(f"  ✗ {port}: nothing, even after a restart: not an ESP32 with a working USB link (try another data "
+            "cable or USB port), or the board isn't powered")
+    else:
+        out(f"  ✗ {port}: the board printed nothing readable. Run again with --reset to restart it and see "
+            "whether the USB link works; its firmware may only serve Wi-Fi (use --find)")
     return 0, None
 
 
@@ -650,6 +671,7 @@ def main():
     ap.add_argument("--find", action="store_true", help="look for the board on the local networks")
     ap.add_argument("--listen", nargs="?", const="", metavar="PORT",
                     help="show what a USB-connected board prints (default: every USB serial port)")
+    ap.add_argument("--reset", action="store_true", help="with --listen: restart the ESP32 first, to see its start-up")
     args = ap.parse_args()
     for stream in (sys.stdout, sys.stderr):           # Windows consoles: don't die on ✓ and ·
         try:
@@ -670,7 +692,7 @@ def main():
         ok = False
         for p in ports:
             print(f"── {p}")
-            ok = listen(p)[0] > 0 or ok
+            ok = listen(p, reset=args.reset)[0] > 0 or ok
         sys.exit(0 if ok else 1)
     if args.probe is not None:
         target = args.probe or url
