@@ -117,3 +117,50 @@ def test_polling_a_board_without_values_says_so(capsys):
     eb.run_http("http://b/", lambda p, t: None, "exterior", now=lambda: 1.0, sleep=lambda s: None,
                 fetch=lambda u: {"title": "hello"}, max_loops=5)
     assert "--probe" in capsys.readouterr().err
+
+
+def _raw_server(pages):
+    """A server like a hand-written ESP32 WiFiServer sketch: no status line, no headers."""
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+
+    def serve():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            req = c.recv(1024).decode()
+            path = req.split(" ")[1] if " " in req else "/"
+            c.sendall(pages.get(path, "<html><head></head><body>404</body></html>").encode())
+            c.close()
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+def test_board_without_http_headers_is_read():
+    page = "<html><head><title>Rad</title></head><body>CPM: 31<br>Satellites: 6<br>Lat: 19.07601<br>Lon: 72.87765</body></html>"
+    srv = _raw_server({"/": page})
+    try:
+        url = f"http://127.0.0.1:{srv.getsockname()[1]}/"
+        line = eb.recognise(eb.poll_http(url))
+        assert line["geiger"]["cpm"] == 31.0 and line["gnss"]["sats"] == 6.0 and line["gnss"]["lat"] == 19.07601
+        assert eb.probe(url, out=lambda s: None) == url
+    finally:
+        srv.close()
+
+
+def test_find_survives_odd_devices():
+    def get(u):
+        if "10.0.0.5" in u:
+            raise ValueError("weird")          # e.g. a printer answering nonsense
+        if "10.0.0.6" in u:
+            return "<html><head><title>Router</title></head></html>"
+        return '{"cpm": 19}'
+    lines = []
+    found = eb.find(["10.0.0.5", "10.0.0.6", "10.0.0.7"], get=get, out=lines.append, port_open=lambda h: True)
+    assert found == ["http://10.0.0.7/"]
+    assert any('10.0.0.6: web server, "Router"' in ln for ln in lines)

@@ -30,6 +30,7 @@ Modes: stdout | mqtt | both.   --send CMD (USB, IMM-OS firmware): STATUS, WIFI_S
 """
 import argparse
 import html
+import http.client
 import json
 import os
 import re
@@ -274,9 +275,39 @@ class Dedup:
         return True
 
 
+FETCH_ERRORS = (urllib.error.URLError, http.client.HTTPException, OSError, ValueError)
+
+
+def get_raw(url: str, timeout: float = 3.0) -> str:
+    """GET for small hand-written servers that send the page without an HTTP status line and
+    headers (common in ESP32 WiFiServer sketches): read until the board closes the connection."""
+    from urllib.parse import urlsplit
+    u = urlsplit(url)
+    path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+    with socket.create_connection((u.hostname, u.port or 80), timeout=timeout) as c:
+        c.sendall(f"GET {path} HTTP/1.0\r\nHost: {u.hostname}\r\nConnection: close\r\n\r\n".encode())
+        chunks, total, end = [], 0, time.monotonic() + timeout
+        while total < 512 * 1024 and time.monotonic() < end:
+            try:
+                b = c.recv(4096)
+            except socket.timeout:
+                break                                   # some sketches never close: keep what arrived
+            if not b:
+                break
+            chunks.append(b)
+            total += len(b)
+    text = b"".join(chunks).decode("utf-8", "replace")
+    if text.startswith("HTTP/"):                        # headers after all: drop them
+        text = text.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in text else text.split("\n\n", 1)[-1]
+    return text
+
+
 def get_text(url: str, timeout: float = 3.0) -> str:
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return r.read(512 * 1024).decode("utf-8", "replace")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.read(512 * 1024).decode("utf-8", "replace")
+    except (http.client.BadStatusLine, http.client.RemoteDisconnected):
+        return get_raw(url, timeout)
 
 
 def poll_http(url: str, timeout: float = 3.0):
@@ -303,7 +334,7 @@ def run_http(url, publish_fn, zone, now=time.time, sleep=time.sleep, fetch=poll_
                           file=sys.stderr, flush=True)
                 for topic, payload in out:
                     publish_fn(payload, topic)
-        except (urllib.error.URLError, OSError, ValueError) as e:
+        except FETCH_ERRORS as e:
             failing += 1
             if failing in (1, 10) or failing % 60 == 0:     # say it, without flooding the journal
                 print(json.dumps({"error": f"external board not answering at {url}: {e}"}), file=sys.stderr, flush=True)
@@ -351,7 +382,7 @@ def probe(url: str, mapping=None, get=get_text, out=print) -> str:
     from urllib.parse import urljoin
     try:
         body = get(url)
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except FETCH_ERRORS as e:
         out(f"  ✗ {url}: {e}")
         return ""
     line = recognise(parse_body(body), mapping)
@@ -372,7 +403,7 @@ def probe(url: str, mapping=None, get=get_text, out=print) -> str:
             tried.add(u)
             try:
                 b = get(u)
-            except (urllib.error.URLError, OSError, ValueError):
+            except FETCH_ERRORS:
                 continue
             ln = recognise(parse_body(b), mapping)
             if score(ln):
@@ -385,6 +416,14 @@ def probe(url: str, mapping=None, get=get_text, out=print) -> str:
         out("  ✗ no GNSS or Geiger values found. Send the board's dashboard code to whoever maintains IMM-OS, "
             "set EXT_BOARD_MAP, or flash firmware/esp32-external")
     return best
+
+
+def page_title(host, get=get_text) -> str:
+    try:
+        m = re.search(r"<title>(.*?)</title>", get(f"http://{host}/"), re.I | re.S)
+        return f'"{m.group(1).strip()[:40]}"' if m else "no title"
+    except FETCH_ERRORS:
+        return "no answer"
 
 
 def local_hosts():
@@ -426,10 +465,16 @@ def find(hosts=None, get=get_text, out=print, port_open=None) -> list:
         up = [h for h, o in zip(hosts, ex.map(port_open, hosts)) if o]
     found = []
     for h in up:
-        best = probe(f"http://{h}/", get=get, out=lambda s: None)
+        try:
+            best = probe(f"http://{h}/", get=get, out=lambda s: None)
+        except Exception as e:                          # one odd device must not stop the search
+            out(f"  · {h}: web server, unreadable ({type(e).__name__})")
+            continue
         if best:
             out(f"  ✓ board at {h}: EXT_BOARD_URL={best}")
             found.append(best)
+        else:
+            out(f"  · {h}: web server, {page_title(h, get)}: no GNSS/Geiger values")
     if not found:
         out(f"  ✗ none of the {len(up)} web servers found serves GNSS or Geiger values "
             "(is the board on the same Wi-Fi as the Pi? try --probe http://<board-ip>/)")
