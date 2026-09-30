@@ -194,6 +194,16 @@ def test_send_keeps_wifi_name_and_password_case():
     assert s.out == b"CAL_O2\n"
 
 
+def test_send_says_when_the_board_does_not_reply(capsys):
+    class Ser:
+        port = "/dev/ttyUSB0"
+        def reset_input_buffer(self): pass
+        def write(self, b): pass
+        def readline(self): return b""
+    assert esp32_bridge.send(Ser(), "STATUS", listen_s=0) == 1
+    assert "no reply from the board on /dev/ttyUSB0" in capsys.readouterr().out
+
+
 def test_send_keeps_listening_through_a_board_reset(capsys):
     class SerialException(OSError):                # pyserial's, without needing pyserial here
         pass

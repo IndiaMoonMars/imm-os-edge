@@ -206,7 +206,7 @@ def send(ser, command: str, listen_s: float = 13.0) -> int:
             print("  esp32:", parsed[1])
             got = True
     if not got:
-        print(f"  no reply from the board on {ser.port} in {listen_s:.0f} s: it may be restarting (send the "
+        print(f"  no reply from the board on {getattr(ser, 'port', 'USB')} in {listen_s:.0f} s: it may be restarting (send the "
               "command again in 10 s), or this is not the IMM-OS firmware (flash it: scripts/flash-esp32.sh)")
     return 0 if got else 1
 
