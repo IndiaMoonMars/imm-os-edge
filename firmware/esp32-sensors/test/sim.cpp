@@ -20,6 +20,7 @@
 //     i2cstuck N                  a device holds SDA low until SCL is clocked N times
 //     wdt                         print the task watchdog's longest gap between feeds (ms) and its timeout
 //     scdstate                    print the SCD40's self-calibration setting, last forced-recalibration target
+//     scdselftest CODE            what the SCD40's self-test answers (0 = passed)
 //     bnoset B0 … B21             the BNO055's calibration offsets (what the fusion found; 0x55-0x6A)
 //     bnooffsets                  print the BNO055's calibration offset registers
 //     wifi                        print the network the board joined ([ssid] [password] up)
@@ -119,7 +120,7 @@ struct Bme280Dev : RegDevice {
 
 struct Scd40Dev : I2CDevice {
   bool running = false;
-  int asc = 1, ascPersisted = 1, frcTarget = 0, persists = 0;
+  int asc = 1, ascPersisted = 1, frcTarget = 0, persists = 0, selfTest = 0, factoryResets = 0;
   uint32_t runningSince = 0;
   uint32_t nextReady = 0;
   uint16_t words[3] = {0, 0, 0};
@@ -144,6 +145,8 @@ struct Scd40Dev : I2CDevice {
       frcTarget = arg;
       pushWord((uint16_t)(0x8000 + (int)arg - (int)words[0]));
     }
+    else if (cmd == 0x3639 && !running) pushWord((uint16_t)selfTest);      // perform_self_test
+    else if (cmd == 0x3632 && !running) { asc = ascPersisted = 1; frcTarget = 0; factoryResets++; }
     else if (cmd == 0xE4B8) pushWord(ready() ? 0x8006 : 0x8000);
     else if (cmd == 0xEC05 && ready()) { for (uint16_t w : words) pushWord(w); nextReady = sim::now_ms + 5000; }
   }
@@ -229,7 +232,9 @@ int main(int, char** argv) {
     else if (op == "http") { std::string path; ss >> path; web.routes.at(path)();
                              std::cout << "HTTP " << web.code << " " << web.type << " " << web.body.substr(0, 600) << "\n"; }
     else if (op == "scdstate") std::cout << "SCD asc=" << scdDev.asc << " persisted=" << scdDev.ascPersisted
-                                          << " frc=" << scdDev.frcTarget << " running=" << scdDev.running << "\n";
+                                          << " frc=" << scdDev.frcTarget << " running=" << scdDev.running
+                                          << " resets=" << scdDev.factoryResets << "\n";
+    else if (op == "scdselftest") ss >> scdDev.selfTest;
     else if (op == "bnooffsets") { std::cout << "BNOOFF"; for (int i = 0x55; i <= 0x6A; i++) std::cout << " " << (int)bnoDev.reg[i]; std::cout << "\n"; }
     else if (op == "bnoset") { for (int i = 0x55; i <= 0x6A; i++) { int v; ss >> v; bnoDev.reg[i] = (uint8_t)v; } }
     else if (op == "wdt") std::cout << "WDT " << sim::wdt_max_gap << " " << sim::wdt_timeout_s * 1000 << " " << sim::wdt_added << "\n";

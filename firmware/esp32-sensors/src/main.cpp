@@ -52,6 +52,8 @@
 //   CAL_CO2 [ppm]  after 3 min in fresh outdoor air: SCD40 forced recalibration to ppm (default 420),
 //                  and automatic self-calibration off (stored in the sensor)
 //   ASC_ON         automatic self-calibration back on (after the mission)
+//   SCD_TEST       SCD40 self-test (10 s): tells a faulty sensor from a weak supply when CO2 reads 0
+//   SCD_RESET      SCD40 factory reset: forgets forced recalibration and stored settings
 //   CAL_BNO_CLEAR  forget the stored BNO055 calibration
 //   WIFI_SSID <network name>   (the rest of the line: spaces allowed; case kept)
 //   WIFI_PASS <password>       then it connects; WIFI_PASS alone for an open network
@@ -282,6 +284,7 @@ static bool scdReadWords(uint16_t* words, int n) {
 
 static int scdAsc = -1;                                         // automatic self-calibration: 1 on, 0 off, -1 unknown
 static uint32_t scdStartedMs = 0;
+static int scdZeroes = 0;                                       // CO2 = 0 readings in a row (explained, not published)
 
 static bool scdInit() {
   scdFound = false;
@@ -340,6 +343,53 @@ static void scdAscOn() {
   scdCommand(0x21B1);
   scdStartedMs = millis();
   diag("ASC_ON: SCD40 automatic self-calibration on");
+}
+
+// Waits that are longer than the task watchdog allows: check in while waiting.
+static void scdWait(uint32_t ms) {
+  for (uint32_t t = 0; t < ms; t += 100) { delay(100); esp_task_wdt_reset(); }
+}
+
+// perform_self_test (datasheet 3.9.3): 10 s, the sensor checks itself; 0 = no malfunction.
+static void scdSelfTest() {
+  if (!scdFound) { diag("SCD_TEST: no SCD40 found"); return; }
+  diag("SCD_TEST: self-test running (10 s, no readings meanwhile)");
+  scdCommand(0x3F86);
+  scdWait(500);
+  uint16_t w = 0xFFFF;
+  if (scdCommand(0x3639)) {
+    scdWait(10000);
+    if (!scdReadWords(&w, 1)) w = 0xFFFF;
+  }
+  char m[160];
+  if (w == 0) snprintf(m, sizeof m, "SCD_TEST: passed. If CO2 still reads 0, the 3.3 V supply sags during the "
+                                    "SCD40's lamp pulses: give it its own 3.3 V or 5 V supply and short wires");
+  else if (w == 0xFFFF) snprintf(m, sizeof m, "SCD_TEST: no answer from the SCD40");
+  else snprintf(m, sizeof m, "SCD_TEST: FAILED (code 0x%04X): the sensor reports a malfunction; try SCD_RESET, "
+                             "else replace the SCD40", w);
+  diag(m);
+  scdCommand(0x21B1);
+  scdStartedMs = millis();
+  scdZeroes = 0;
+}
+
+// perform_factory_reset (datasheet 3.9.4): forgets forced recalibration and stored settings.
+static void scdFactoryReset() {
+  if (!scdFound) { diag("SCD_RESET: no SCD40 found"); return; }
+  scdCommand(0x3F86);
+  scdWait(500);
+  const bool ok = scdCommand(0x3632);
+  scdWait(1200);
+  uint16_t w;
+  if (scdCommand(0x2313)) {
+    delay(1);
+    if (scdReadWords(&w, 1)) scdAsc = w ? 1 : 0;
+  }
+  scdCommand(0x21B1);
+  scdStartedMs = millis();
+  scdZeroes = 0;
+  diag(ok ? "SCD_RESET: SCD40 back to factory settings (calibration forgotten, self-calibration on); "
+            "first CO2 reading in 5 s" : "SCD_RESET: the SCD40 did not accept the command");
 }
 
 // true and fills the values only when a new measurement is ready
@@ -483,7 +533,7 @@ static Mq4Reading mq4Read() {
 
 // ── Main loop ────────────────────────────────────────────────────────
 static uint32_t lastSample = 0, lastProbe = 0, lastBoard = 0;
-static int bmeFails = 0, scdZeroes = 0;
+static int bmeFails = 0;
 static char cmd[112];
 static int cmdLen = 0;
 
@@ -636,12 +686,16 @@ static void handleCommand() {
     else scdForcedCal(ppm);
   } else if (strcmp(cmd, "ASC_ON") == 0) {
     scdAscOn();
+  } else if (strcmp(cmd, "SCD_TEST") == 0) {
+    scdSelfTest();
+  } else if (strcmp(cmd, "SCD_RESET") == 0) {
+    scdFactoryReset();
   } else if (strcmp(cmd, "CAL_BNO_CLEAR") == 0) {
     bnoPrefs.remove("off");
     bnoCalRestored = bnoCalSaved = false;
     diag("CAL_BNO_CLEAR: stored BNO055 calibration forgotten");
   } else if (cmdLen) {
-    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, CAL_BNO_CLEAR, WIFI_SSID, WIFI_PASS, WIFI_OFF)");
+    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, SCD_TEST, SCD_RESET, CAL_BNO_CLEAR, WIFI_SSID, WIFI_PASS, WIFI_OFF)");
   }
   cmdLen = 0;
 }
@@ -721,7 +775,9 @@ void loop() {
     if (a > 0) n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"co2_ppm\":%.0f,\"temp\":%.2f,\"hum\":%.2f", a, b, c);
     else {
       n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"temp\":%.2f,\"hum\":%.2f", b, c);
-      if (scdZeroes++ % 12 == 0) diag("scd40: CO2 reads 0, left out (normal for the first readings after start)");
+      if (scdZeroes++ % 12 == 0)
+        diag(millis() - scdStartedMs < 60000 ? "scd40: CO2 reads 0, left out (normal for the first readings after start)"
+             : "scd40: CO2 still reads 0 (temperature and humidity are fine): run SCD_TEST");
     }
     if (scdAsc >= 0) n += snprintf(line + n, sizeof line - n, ",\"asc\":%d", scdAsc);
     n += snprintf(line + n, sizeof line - n, "}");

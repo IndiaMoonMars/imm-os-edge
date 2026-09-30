@@ -212,7 +212,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--mode", choices=MODES, default="stdout")
     parser.add_argument("--send", metavar="CMD",
-                        help="STATUS, CAL_MQ4, CAL_O2, CAL_CO2 [ppm], ASC_ON, CAL_BNO_CLEAR, WIFI_SSID <name>, WIFI_PASS <pw>, WIFI_OFF")
+                        help="STATUS, CAL_MQ4, CAL_O2, CAL_CO2 [ppm], ASC_ON, SCD_TEST, SCD_RESET, CAL_BNO_CLEAR, WIFI_SSID <name>, WIFI_PASS <pw>, WIFI_OFF")
     args = parser.parse_args()
     url = os.getenv("ESP32_URL", "").strip()
     if url and not args.send:

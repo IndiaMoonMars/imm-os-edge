@@ -265,13 +265,31 @@ def test_scd40_forced_recalibration_turns_self_calibration_off(sim, tmp_path):
     assert "# CAL_CO2: let the SCD40 run 3 min in fresh air first" in notes
     data, notes = sim(BASE + "run 185\nsend CAL_CO2 430\nrun 12\nscdstate\nsend CAL_CO2 90\nrun 1\n", tmp_path)
     assert "# CAL_CO2: SCD40 set to 430 ppm (correction -182 ppm); automatic self-calibration off" in notes  # it read 612
-    assert "SCD asc=0 persisted=0 frc=430 running=1" in notes        # stored in the sensor; measuring again
+    assert "SCD asc=0 persisted=0 frc=430 running=1 resets=0" in notes        # stored in the sensor; measuring again
     assert [d["scd40"] for d in data if "scd40" in d][-1]["asc"] == 0
     assert any("ppm must be 400-2000" in n for n in notes)
     _, notes = sim(BASE + "run 185\nsend CAL_CO2\nrun 2\nsend ASC_ON\nrun 6\nscdstate\n", tmp_path)
     assert "# ASC_ON: SCD40 automatic self-calibration on" in notes
-    assert "SCD asc=1 persisted=1 frc=420 running=1" in notes
+    assert "SCD asc=1 persisted=1 frc=420 running=1 resets=0" in notes
 
+
+def test_scd40_zero_co2_is_explained_and_self_test_tells_fault_from_supply(sim, tmp_path):
+    zero = BASE.replace("scd 612 ", "scd 0 ")
+    data, notes = sim(zero + "run 70\n", tmp_path)
+    assert all("co2_ppm" not in d.get("scd40", {}) for d in data)
+    assert any("temp" in d.get("scd40", {}) for d in data)             # temperature and humidity still published
+    assert any("CO2 still reads 0" in n and "SCD_TEST" in n for n in notes)
+    _, notes = sim(zero + "run 6\nsend SCD_TEST\nrun 7\nscdstate\n", tmp_path)
+    assert any(n.startswith("# SCD_TEST: passed") and "supply" in n for n in notes)
+    assert any(n.startswith("SCD asc=1") and "running=1" in n for n in notes)   # measuring again afterwards
+    _, notes = sim(zero + "scdselftest 5\nrun 6\nsend scd_test\nrun 1\n", tmp_path)
+    assert any(n.startswith("# SCD_TEST: FAILED (code 0x0005)") for n in notes)
+
+
+def test_scd40_factory_reset_forgets_forced_recalibration(sim, tmp_path):
+    _, notes = sim(BASE + "run 185\nsend CAL_CO2 430\nrun 2\nsend SCD_RESET\nrun 6\nscdstate\n", tmp_path)
+    assert any(n.startswith("# SCD_RESET: SCD40 back to factory settings") for n in notes)
+    assert "SCD asc=1 persisted=1 frc=0 running=1 resets=1" in notes
 
 
 # ── Wi-Fi ───────────────────────────────────────────────────────────
