@@ -205,6 +205,9 @@ def send(ser, command: str, listen_s: float = 13.0) -> int:
         if parsed and parsed[0] == "info":
             print("  esp32:", parsed[1])
             got = True
+    if not got:
+        print(f"  no reply from the board on {ser.port} in {listen_s:.0f} s: it may be restarting (send the "
+              "command again in 10 s), or this is not the IMM-OS firmware (flash it: scripts/flash-esp32.sh)")
     return 0 if got else 1
 
 
@@ -241,7 +244,8 @@ def main():
             for o in others:
                 print("   ", o)
             print("  for clean replies: sudo systemctl stop imm-sensor-pipeline@esp32_bridge.py  (start it again after)")
-        sys.exit(send(ser, args.send))
+        long = args.send.strip().upper().startswith("SCD_TEST")      # the self-test itself takes 10 s
+        sys.exit(send(ser, args.send, listen_s=20.0 if long else 13.0))
     read_loop(ser, make_publisher(args.mode, "habitat/sensors/esp32/zone1"))
 
 
