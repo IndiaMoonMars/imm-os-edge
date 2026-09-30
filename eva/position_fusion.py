@@ -11,8 +11,12 @@ import json
 import time
 import logging
 import threading
-import paho.mqtt.client as mqtt
 import os
+import sys
+import paho.mqtt.client as mqtt
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+import watchdog  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [pos_fusion] %(message)s")
 log = logging.getLogger(__name__)
@@ -29,7 +33,7 @@ _lock = threading.Lock()
 def on_message(client, userdata, msg):
     try:
         data = json.loads(msg.payload.decode())
-        crew_id = data.get("crew_id", "EV1")
+        crew_id = str(data.get("crew_id") or os.getenv("CREW_ID", "ev1")).lower()
         with _lock:
             if "uwb" in msg.topic:
                 _uwb_frames[crew_id] = data
@@ -74,10 +78,15 @@ def fuse_and_publish(pub_client: mqtt.Client):
             pub_client.publish(topic, json.dumps(unified))
             log.info(f"[{crew_id}] mode={unified['mode']} quality={unified['quality']}")
 
-        time.sleep(0.2)
+        watchdog.sleep(0.2)
 
 def main():
     client = mqtt.Client(client_id="pos-fusion")
+    # Broker requires auth (allow_anonymous false); user/topics in imm-os-infra mosquitto/config/acl
+    if os.getenv("MQTT_USERNAME"):
+        client.username_pw_set(os.getenv("MQTT_USERNAME"), os.getenv("MQTT_PASSWORD"))
+    if os.getenv("MQTT_TLS_CA"):  # broker TLS listener (8883); verifies cert + hostname
+        client.tls_set(ca_certs=os.getenv("MQTT_TLS_CA"))
     client.on_message = on_message
     client.connect(MQTT_HOST, MQTT_PORT, 60)
     client.subscribe("habitat/eva/uwb")

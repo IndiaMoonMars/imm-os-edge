@@ -1,6 +1,6 @@
 # Sensor Simulator — IMM-OS Edge
 
-Software-only replacement for the physical RPi and Jetson edge nodes.
+Software-only replacement for the physical Raspberry Pi edge nodes.
 Publishes realistic telemetry to MQTT so the entire backend/InfluxDB/OpenMCT
 pipeline can be developed and tested **before hardware arrives**.
 
@@ -22,9 +22,9 @@ pipeline can be developed and tested **before hardware arrives**.
 
 | Node ID | Type | Location | Sensors |
 |---|---|---|---|
-| `node-rpi-01` | Raspberry Pi 4 | Habitat Zone A | temp, humidity, pressure, CO2, O2 |
-| `node-rpi-02` | Raspberry Pi 4 | Habitat Zone B | temp, humidity, pressure, CO2, O2 |
-| `node-jetson` | Jetson Orin Nano | Edge AI | CPU temp, GPU temp, power, battery, solar |
+| `node-rpi-01` | Raspberry Pi 4 | Habitat Zone A | temp, humidity, pressure, CO2, O2, node health |
+| `node-rpi-02` | Raspberry Pi 4 | Habitat Zone B | temp, humidity, pressure, CO2, O2, node health |
+| `node-compute` | Raspberry Pi 5 | Compute / power | node health (`sysmon`: CPU temp, load, PMIC power, fan, supply), battery, solar |
 
 ## MQTT Topic Format
 
@@ -61,7 +61,7 @@ docker compose up sensor-sim
 
 ## Integrating Real Sensors
 
-When your RPi/Jetson hardware arrives:
+When your Raspberry Pi hardware arrives:
 
 1. Deploy real sensor drivers to the physical node
 2. Have them publish JSON to the **same MQTT topics** with the **same payload schema**
