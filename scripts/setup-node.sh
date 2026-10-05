@@ -246,8 +246,11 @@ if [ "$SKIP_APT" = 0 ]; then
     for p in python3-lgpio python3-spidev python3-evdev; do
         if apt-cache show "$p" >/dev/null 2>&1; then os_py+=("$p"); else warn "$p not in the package lists; the drivers that need it won't start"; fi
     done
+    # avahi-daemon + libnss-mdns let the Pi resolve .local names, so a board reached as
+    # http://imm-sensors.local/json is found whatever IP the router gave it (no reserved IP).
     run apt-get install -y -qq --no-install-recommends \
-        python3-venv python3-dev python3-pip git curl openssl i2c-tools mosquitto-clients "${os_py[@]}"
+        python3-venv python3-dev python3-pip git curl openssl i2c-tools mosquitto-clients \
+        avahi-daemon libnss-mdns "${os_py[@]}"
     if [ "$DIRECT" = 0 ]; then run apt-get install -y -qq --no-install-recommends mosquitto; fi
     ok "system packages installed"
 fi

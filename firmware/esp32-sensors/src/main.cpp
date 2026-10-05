@@ -8,6 +8,8 @@
 // the board also serves the same line at http://<board-ip>/json and a live page at
 // http://<board-ip>/, so the Pi can read it over Wi-Fi (ESP32_URL) instead of USB. USB output
 // continues either way; the MQ-4 is on ADC1, which works with Wi-Fi on.
+// The board announces itself over mDNS as "imm-sensors", so it is reachable as
+// http://imm-sensors.local/json whatever IP the router gives it — no reserved IP, any router.
 //
 //   I2C (GPIO21 SDA, GPIO22 SCL, 3.3 V): BME280 (0x76/0x77), SCD40 (0x62),
 //                                         BNO055 (0x28/0x29), DFRobot SEN0322 O2 (0x70-0x73)
@@ -59,6 +61,7 @@
 //   WIFI_PASS <password>       then it connects; WIFI_PASS alone for an open network
 //   WIFI_OFF                   forget the Wi-Fi network
 #include <Arduino.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -650,6 +653,24 @@ static void wifiStart() {
   webStart();
 }
 
+// Announce "imm-sensors" on the network once Wi-Fi is up, so the Pi reaches this board as
+// http://imm-sensors.local/json whatever IP the router gives it — on this router or any future
+// one, with nothing to reserve. Re-announced if Wi-Fi drops and comes back.
+bool mdnsStarted = false;
+static void mdnsTick() {
+  const bool up = WiFi.status() == WL_CONNECTED;
+  if (up && !mdnsStarted) {
+    if (MDNS.begin("imm-sensors")) {
+      MDNS.addService("http", "tcp", 80);
+      mdnsStarted = true;
+      diag("mdns: reachable as http://imm-sensors.local/json (the name works on any router)");
+    }
+  } else if (!up && mdnsStarted) {
+    MDNS.end();
+    mdnsStarted = false;
+  }
+}
+
 static void handleCommand() {
   cmd[cmdLen] = 0;
   for (char* p = cmd; *p && *p != ' '; p++) *p = (char)toupper(*p);   // the command word is case-insensitive;
@@ -735,7 +756,7 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();
-  if (webStarted) web.handleClient();
+  if (webStarted) { web.handleClient(); mdnsTick(); }
   while (Serial.available()) {
     const int c = Serial.read();
     if (c == '\n' || c == '\r') handleCommand();

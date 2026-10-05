@@ -308,6 +308,14 @@ def test_wifi_from_usb_commands_serves_json_and_page(sim, tmp_path):
     assert any(n.startswith("HTTP 200 text/html") and "IMM-OS sensor board" in n for n in notes)
 
 
+def test_mdns_announces_the_board_by_name_once_wifi_is_up(sim, tmp_path):
+    # imm-sensors.local lets the Pi find the board on any router without a reserved IP
+    _, notes = sim(BASE + "run 1\nmdns\nsend WIFI_SSID Net\nsend WIFI_PASS pw\nrun 1\nmdns\n", tmp_path)
+    assert "MDNS  0" in notes                                              # nothing announced before Wi-Fi
+    assert "# mdns: reachable as http://imm-sensors.local/json (the name works on any router)" in notes
+    assert "MDNS imm-sensors 1" in notes                                   # announced once connected
+
+
 def test_wifi_remembered_across_restart_and_forgotten(sim, tmp_path):
     _, notes = sim(BASE + "run 1\nsend WIFI_SSID Hab\nsend WIFI_PASS secret\nrun 1\nresetreason 6\nreset\nrun 1\nwifi\n"
                    "send WIFI_OFF\nrun 1\nwifi\n", tmp_path)

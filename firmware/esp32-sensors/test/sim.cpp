@@ -24,6 +24,7 @@
 //     bnoset B0 … B21             the BNO055's calibration offsets (what the fusion found; 0x55-0x6A)
 //     bnooffsets                  print the BNO055's calibration offset registers
 //     wifi                        print the network the board joined ([ssid] [password] up)
+//     mdns                        print the mDNS name announced ([host] up)
 //     http PATH                   call the board's web server (/ or /json) and print the answer
 // Everything the firmware prints goes to stdout.
 #include <fstream>
@@ -46,6 +47,8 @@ std::map<std::string, std::vector<uint8_t>> nvsb;
 std::map<std::string, std::string> nvss;
 std::string wifi_ssid, wifi_pass;
 bool wifi_up = false, wifi_stack = false;
+std::string mdns_host;
+bool mdns_up = false;
 std::map<uint8_t, I2CDevice*> bus;
 }
 HardwareSerial Serial;
@@ -229,6 +232,7 @@ int main(int, char** argv) {
     else if (op == "resetreason") ss >> sim::reset_reason;
     else if (op == "i2cstuck") ss >> sim::sda_stuck_clocks;
     else if (op == "wifi") std::cout << "WIFI [" << sim::wifi_ssid << "] [" << sim::wifi_pass << "] " << sim::wifi_up << "\n";
+    else if (op == "mdns") std::cout << "MDNS " << sim::mdns_host << " " << sim::mdns_up << "\n";
     else if (op == "http") { std::string path; ss >> path; web.routes.at(path)();
                              std::cout << "HTTP " << web.code << " " << web.type << " " << web.body.substr(0, 600) << "\n"; }
     else if (op == "scdstate") std::cout << "SCD asc=" << scdDev.asc << " persisted=" << scdDev.ascPersisted
@@ -244,6 +248,7 @@ int main(int, char** argv) {
       i2cErr = 0; i2cStreak = 0; i2cRecoveries = 0; sim::wdt_added = false; sim::wdt_max_gap = 0;
       bnoCalRestored = bnoCalSaved = false; scdAsc = -1; scdStartedMs = 0;
       wifiSsid[0] = wifiPass[0] = 0; sim::wifi_up = false; sim::wifi_ssid.clear(); sim::wifi_pass.clear();
+      mdnsStarted = false; sim::mdns_up = false; sim::mdns_host.clear();
       setup();
     }
     flush();
