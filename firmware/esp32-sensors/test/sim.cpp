@@ -25,6 +25,7 @@
 //     bnooffsets                  print the BNO055's calibration offset registers
 //     wifi                        print the network the board joined ([ssid] [password] up)
 //     mdns                        print the mDNS name announced ([host] up)
+//     reboots                     print how many times the firmware called esp_restart()
 //     http PATH                   call the board's web server (/ or /json) and print the answer
 // Everything the firmware prints goes to stdout.
 #include <fstream>
@@ -47,6 +48,7 @@ std::map<std::string, std::vector<uint8_t>> nvsb;
 std::map<std::string, std::string> nvss;
 std::string wifi_ssid, wifi_pass;
 bool wifi_up = false, wifi_stack = false;
+int reboots = 0;
 std::string mdns_host;
 bool mdns_up = false;
 std::map<uint8_t, I2CDevice*> bus;
@@ -233,6 +235,7 @@ int main(int, char** argv) {
     else if (op == "i2cstuck") ss >> sim::sda_stuck_clocks;
     else if (op == "wifi") std::cout << "WIFI [" << sim::wifi_ssid << "] [" << sim::wifi_pass << "] " << sim::wifi_up << "\n";
     else if (op == "mdns") std::cout << "MDNS " << sim::mdns_host << " " << sim::mdns_up << "\n";
+    else if (op == "reboots") std::cout << "REBOOTS " << sim::reboots << "\n";
     else if (op == "http") { std::string path; ss >> path; web.routes.at(path)();
                              std::cout << "HTTP " << web.code << " " << web.type << " " << web.body.substr(0, 600) << "\n"; }
     else if (op == "scdstate") std::cout << "SCD asc=" << scdDev.asc << " persisted=" << scdDev.ascPersisted
@@ -249,6 +252,7 @@ int main(int, char** argv) {
       bnoCalRestored = bnoCalSaved = false; scdAsc = -1; scdStartedMs = 0;
       wifiSsid[0] = wifiPass[0] = 0; sim::wifi_up = false; sim::wifi_ssid.clear(); sim::wifi_pass.clear();
       mdnsStarted = false; sim::mdns_up = false; sim::mdns_host.clear();
+      sim::reboots = 0; lastI2cOkMs = 0; i2cEverOk = false; lastStallRecover = 0; stallRebooted = false;
       setup();
     }
     flush();

@@ -292,6 +292,32 @@ def test_scd40_factory_reset_forgets_forced_recalibration(sim, tmp_path):
     assert "SCD asc=1 persisted=1 frc=0 running=1 resets=1" in notes
 
 
+def test_scd_off_disables_the_sensor_is_remembered_and_scd_on_resumes(sim, tmp_path):
+    data, notes = sim(BASE + "run 7\nsend SCD_OFF\nrun 3\nsend SCD_ON\nrun 45\n", tmp_path)
+    assert any(n.startswith("# scd40: disabled and remembered") for n in notes)
+    assert any(n.startswith("# scd40: enabled") for n in notes)
+    assert any("scd40" in d for d in data[:10])                # present before SCD_OFF (every 5 s)
+    assert any("scd40" in d for d in data[-8:])                # back after SCD_ON + a re-probe (5 s cadence)
+    # remembered across a restart (stored in NVS): the board does not look for it after a reset
+    _, notes = sim(BASE + "run 1\nsend SCD_OFF\nrun 1\nresetreason 1\nreset\nrun 1\nsend STATUS\nrun 1\n", tmp_path)
+    assert any("scd40=none" in n for n in notes)
+
+
+def test_self_heal_recovers_then_reboots_when_all_i2c_sensors_go_silent(sim, tmp_path):
+    # a dead device holding the shared bus silences every I2C sensor while the board keeps running
+    _, notes = sim(BASE + "run 5\nremove bme\nremove scd\nremove bno\nremove o2\nrun 130\nreboots\n", tmp_path)
+    assert any(n.startswith("# self-heal: no I2C sensor data; recovering the bus") for n in notes)
+    assert any(n.startswith("# self-heal: I2C sensors still silent; rebooting") for n in notes)
+    assert "REBOOTS 1" in notes                                # recover first, then one reboot
+
+
+def test_self_heal_leaves_a_board_with_a_working_sensor_alone(sim, tmp_path):
+    # removing only the faulty SCD40 (the real fix) must NOT trigger a reboot: the others still read
+    _, notes = sim(BASE + "run 5\nremove scd\nrun 130\nreboots\n", tmp_path)
+    assert not any("self-heal" in n for n in notes)
+    assert "REBOOTS 0" in notes
+
+
 # ── Wi-Fi ───────────────────────────────────────────────────────────
 
 def test_wifi_from_usb_commands_serves_json_and_page(sim, tmp_path):

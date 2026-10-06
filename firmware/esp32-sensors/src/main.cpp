@@ -56,6 +56,7 @@
 //   ASC_ON         automatic self-calibration back on (after the mission)
 //   SCD_TEST       SCD40 self-test (10 s): tells a faulty sensor from a weak supply when CO2 reads 0
 //   SCD_RESET      SCD40 factory reset: forgets forced recalibration and stored settings
+//   SCD_OFF/SCD_ON stop/resume using the SCD40 (remembered): for a faulty SCD40 that hangs the I2C bus
 //   CAL_BNO_CLEAR  forget the stored BNO055 calibration
 //   WIFI_SSID <network name>   (the rest of the line: spaces allowed; case kept)
 //   WIFI_PASS <password>       then it connects; WIFI_PASS alone for an open network
@@ -73,6 +74,13 @@
 
 static const int PIN_SDA = 21, PIN_SCL = 22, PIN_MQ4 = 32;
 static const uint32_t PERIOD_MS = 1000, REPROBE_MS = 30000, BOARD_MS = 10000;
+// Self-heal: if every I2C sensor goes silent while the board keeps running (a dead device holding
+// the shared bus — seen with a failed SCD40), recover the bus; if that doesn't bring them back,
+// reboot to clear it. A reboot skips the MQ-4 warm-up (reset reason 2-8), so it costs a few seconds.
+static const uint32_t STALL_RECOVER_MS = 45000, STALL_REBOOT_MS = 120000;
+static uint32_t lastI2cOkMs = 0, lastStallRecover = 0;
+static bool i2cEverOk = false, stallRebooted = false;
+static bool scdEnabled = true;                   // SCD_OFF stops the firmware touching a faulty SCD40
 static const uint32_t WDT_TIMEOUT_S = 10;
 static const int I2C_STUCK_STREAK = 20;         // consecutive failed transactions before a bus recovery
 
@@ -291,6 +299,7 @@ static int scdZeroes = 0;                                       // CO2 = 0 readi
 
 static bool scdInit() {
   scdFound = false;
+  if (!scdEnabled) return false;                 // SCD_OFF: never address 0x62, so a faulty one can't hang the bus
   if (!probe(SCD40_ADDR)) return false;
   scdCommand(0x3F86);                                           // stop_periodic_measurement (may still run after an ESP32 reset)
   delay(500);
@@ -711,12 +720,19 @@ static void handleCommand() {
     scdSelfTest();
   } else if (strcmp(cmd, "SCD_RESET") == 0) {
     scdFactoryReset();
+  } else if (strcmp(cmd, "SCD_OFF") == 0) {
+    scdEnabled = false; scdFound = false; prefs.putUInt("scd_off", 1);
+    diag("scd40: disabled and remembered. The firmware will not touch it, so a faulty SCD40 can no "
+         "longer hang the I2C bus; the other sensors keep working. Send SCD_ON to re-enable.");
+  } else if (strcmp(cmd, "SCD_ON") == 0) {
+    scdEnabled = true; prefs.putUInt("scd_off", 0);
+    diag("scd40: enabled; it will be looked for again on the next probe");
   } else if (strcmp(cmd, "CAL_BNO_CLEAR") == 0) {
     bnoPrefs.remove("off");
     bnoCalRestored = bnoCalSaved = false;
     diag("CAL_BNO_CLEAR: stored BNO055 calibration forgotten");
   } else if (cmdLen) {
-    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, SCD_TEST, SCD_RESET, CAL_BNO_CLEAR, WIFI_SSID, WIFI_PASS, WIFI_OFF)");
+    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, SCD_TEST, SCD_RESET, SCD_OFF, SCD_ON, CAL_BNO_CLEAR, WIFI_SSID, WIFI_PASS, WIFI_OFF)");
   }
   cmdLen = 0;
 }
@@ -736,6 +752,7 @@ void setup() {
   }
   prefs.begin("imm-mq4", false);
   mq4R0 = prefs.isKey("r0") ? prefs.getFloat("r0", 0) : 0;   // isKey: no "NOT_FOUND" error log before CAL_MQ4
+  scdEnabled = prefs.getUInt("scd_off", 0) == 0;            // remembered across restarts
   bnoPrefs.begin("imm-bno", false);
   wifiPrefs.begin("imm-wifi", false);
   snprintf(wifiSsid, sizeof wifiSsid, "%s", wifiPrefs.getString("ssid", "").c_str());
@@ -772,6 +789,20 @@ void loop() {
     lastRecovery = now;
     i2cRecover();
   }
+  if (i2cEverOk && now - lastI2cOkMs > STALL_RECOVER_MS) {        // every I2C sensor has gone silent
+    if (now - lastStallRecover >= STALL_RECOVER_MS) {
+      lastStallRecover = now;
+      diag("self-heal: no I2C sensor data; recovering the bus");
+      i2cRecover();
+    }
+    if (now - lastI2cOkMs > STALL_REBOOT_MS && !stallRebooted) {
+      stallRebooted = true;
+      diag("self-heal: I2C sensors still silent; rebooting to clear the bus");
+      Serial.flush();
+      esp_restart();
+      return;
+    }
+  }
   if (now - lastSample < PERIOD_MS) return;
   lastSample = now;
 
@@ -779,8 +810,10 @@ void loop() {
   int n = snprintf(line, sizeof line, "{\"ms\":%lu", (unsigned long)now);
   float a, b, c;
   BnoReading bno;
+  bool i2cOk = false;
   if (bmeRead(a, b, c)) {
     bmeFails = 0;
+    i2cOk = true;
     n += snprintf(line + n, sizeof line - n, ",\"bme280\":{\"temp\":%.2f,\"hum\":%.2f,\"pres\":%.2f}", a, b, c);
   } else if (bme.addr) {
     ++bmeFails;
@@ -792,6 +825,7 @@ void loop() {
     if (bmeFails % 10 == 0) { diag("bme280: re-initialising"); bmeInit(); }
   }
   if (scdRead(a, b, c)) {
+    i2cOk = true;
     // CO2 = 0 is impossible in air (the SCD40's range starts at 400 ppm): leave it out rather than publish it
     if (a > 0) n += snprintf(line + n, sizeof line - n, ",\"scd40\":{\"co2_ppm\":%.0f,\"temp\":%.2f,\"hum\":%.2f", a, b, c);
     else {
@@ -804,6 +838,7 @@ void loop() {
     n += snprintf(line + n, sizeof line - n, "}");
   }
   if (bnoRead(bno)) {
+    i2cOk = true;
     if (!bnoCalSaved && bno.calSys == 3 && bno.calGyro == 3 && bno.calAcc == 3 && bno.calMag == 3) bnoSaveCalibration();
     n += snprintf(line + n, sizeof line - n,
                   ",\"bno055\":{\"heading_deg\":%.2f,\"roll_deg\":%.2f,\"pitch_deg\":%.2f,\"lin_acc_ms2\":%.2f,\"imu_calib\":%d,"
@@ -813,8 +848,11 @@ void loop() {
                   bno.calGyro, bno.calAcc, bno.calMag, bnoCalRestored ? 1 : 0);
   }
   bool o2Cal = false;
-  if (o2Read(a, o2Cal))
+  if (o2Read(a, o2Cal)) {
+    i2cOk = true;
     n += snprintf(line + n, sizeof line - n, ",\"o2\":{\"o2_pct\":%.2f,\"calibrated\":%d}", a, o2Cal ? 1 : 0);
+  }
+  if (i2cOk) { lastI2cOkMs = now; i2cEverOk = true; stallRebooted = false; }
 
   const Mq4Reading mq = mq4Read();
   const bool warming = now < mq4WarmupMs;

@@ -37,6 +37,7 @@ inline void digitalWrite(int pin, int v) {        // a rising edge on SCL (GPIO2
 class HardwareSerial {
  public:
   void begin(uint32_t) {}
+  void flush() {}
   int available() { return (int)sim::rx.size(); }
   int read() { int c = (unsigned char)sim::rx[0]; sim::rx.erase(0, 1); return c; }
   void print(const char* s) { sim::tx += s; }
