@@ -417,11 +417,21 @@ def run_serial(port, publish_fn, zone, now=time.time, mapping=None, baud=115200,
             publish_fn(payload, topic)
 
 
-def serial_ports(find=None):
+def serial_ports(find=None, real=os.path.realpath):
+    """The USB serial ports, by names that survive a reboot (ttyUSB0/1 can swap places).
+
+    By-id names follow the board, whichever socket it is in. But two boards with the same USB chip
+    and no serial number (common with CH340 and CP2102 DevKits) get the same by-id name, so only one
+    of them is listed there; then they are named by the USB socket they are in (by-path): keep
+    each board in its socket."""
     import glob
     find = find or glob.glob
-    ports = sorted(find("/dev/serial/by-id/*"))
-    return ports or sorted(find("/dev/ttyUSB*") + find("/dev/ttyACM*"))
+    ttys = sorted(find("/dev/ttyUSB*") + find("/dev/ttyACM*"))
+    by_id = sorted(find("/dev/serial/by-id/*"))
+    if by_id and len({real(p) for p in by_id}) >= len(ttys):
+        return by_id
+    by_path = sorted(find("/dev/serial/by-path/*"))
+    return by_path or by_id or ttys
 
 
 def port_users(port: str, proc="/proc") -> list:
@@ -531,6 +541,7 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
             return 0, None
         if any('"bme280"' in ln or '"scd40"' in ln or '"bno055"' in ln for ln in lines):
             out("  · this is the INTERNAL sensor board (BME280/SCD40/…), not the external one")
+            out(f"  ✓ internal sensor board: ESP32_PORT={port}")
             return 0, None
         if best and score(best):
             out(f"  · recognised: {summarise(best)}")

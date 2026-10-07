@@ -228,6 +228,7 @@ def test_listen_recognises_the_internal_board_and_a_busy_port():
     baud, _ = eb.listen("/dev/ttyUSB0", seconds=0.2, out=lines.append, users=lambda p: [],
                         opener=lambda p, b: FakeSerial(['{"bme280": {"temp": 24.1}, "scd40": {"co2_ppm": 600}}\n']))
     assert baud == 0 and any("INTERNAL" in ln for ln in lines)
+    assert "  ✓ internal sensor board: ESP32_PORT=/dev/ttyUSB0" in lines      # setup pins it from this line
 
     def busy(p, b):
         raise OSError("[Errno 11] Could not exclusively lock port /dev/ttyUSB0: Resource temporarily unavailable")
@@ -291,3 +292,21 @@ def test_undecodable_bytes_are_not_readable():
     baud, _ = eb.listen("/dev/ttyUSB0", seconds=0.1, out=lines.append, users=lambda p: [], opener=lambda p, b: G())
     assert baud == 0 and not any("readable, but" in ln for ln in lines)
     assert sum("unreadable" in ln for ln in lines) == 10
+
+
+def test_usb_ports_by_board_or_by_socket():
+    real = {"/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0": "/dev/ttyUSB1",
+            "/dev/serial/by-id/usb-Silicon_Labs_CP2102_A-if00-port0": "/dev/ttyUSB0",
+            "/dev/serial/by-id/usb-Silicon_Labs_CP2102_B-if00-port0": "/dev/ttyUSB1"}
+    by_path = ["/dev/serial/by-path/platform-xhci-hcd.0-usb-0:1:1.0-port0",
+               "/dev/serial/by-path/platform-xhci-hcd.1-usb-0:2:1.0-port0"]
+
+    def finder(by_id):
+        return lambda pat: (by_id if "by-id" in pat else by_path if "by-path" in pat
+                            else ["/dev/ttyUSB0", "/dev/ttyUSB1"] if "ttyUSB" in pat else [])
+    # two different chips (or serial numbers): named by board, whichever socket it is in
+    two = list(real)[1:]
+    assert eb.serial_ports(finder(two), real=real.get) == sorted(two)
+    # two identical CH340s: one by-id name for both boards, so they are named by socket
+    assert eb.serial_ports(finder(list(real)[:1]), real=real.get) == by_path
+    assert eb.serial_ports(lambda pat: ["/dev/ttyUSB0"] if "ttyUSB" in pat else []) == ["/dev/ttyUSB0"]

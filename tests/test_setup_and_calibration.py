@@ -201,3 +201,23 @@ def test_setup_ext_board_checks_the_url_and_adds_the_driver(tmp_path):
     assert out.returncode == 0, out.stdout + out.stderr
     assert f"EXT_BOARD_URL=http://127.0.0.1:{srv.server_port}/data" in out.stdout      # the page's data URL
     assert "IMM_SENSORS=sysmon_driver.py bme280_driver.py external_board_bridge.py" in out.stdout
+
+
+def test_setup_both_boards_on_usb_pins_both_ports(tmp_path, monkeypatch):
+    # what external_board_bridge.py --listen prints with both boards on the Pi's USB
+    fake = tmp_path / "fake_bridge.py"
+    fake.write_text(
+        "import sys\n"
+        "print('\\u2500\\u2500 /dev/serial/by-path/platform-xhci-hcd.0-usb-0:1:1.0-port0')\n"
+        "print('  \\u2713 internal sensor board: ESP32_PORT=/dev/serial/by-path/platform-xhci-hcd.0-usb-0:1:1.0-port0')\n"
+        "print('\\u2500\\u2500 /dev/serial/by-path/platform-xhci-hcd.1-usb-0:2:1.0-port0')\n"
+        "print('  \\u2713 use EXT_BOARD_PORT=/dev/serial/by-path/platform-xhci-hcd.1-usb-0:2:1.0-port0 EXT_BOARD_BAUD=115200')\n")
+    monkeypatch.setenv("IMM_EXT_BOARD_BRIDGE", str(fake))
+    secrets = tmp_path / "secrets"
+    secrets.write_text("IMM_EDGE_CLIENT_SECRET=a\nMQTT_PASSWORD=b\n")
+    out = _setup_dry(tmp_path, "--secrets-file", str(secrets), "--int-board", "usb", "--ext-board", "usb")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "ESP32_PORT=/dev/serial/by-path/platform-xhci-hcd.0-usb-0:1:1.0-port0" in out.stdout
+    assert "EXT_BOARD_PORT=/dev/serial/by-path/platform-xhci-hcd.1-usb-0:2:1.0-port0" in out.stdout
+    assert "ESP32_URL=" in out.stdout and "EXT_BOARD_URL=" in out.stdout          # Wi-Fi addresses cleared
+    assert "esp32_bridge.py" in out.stdout and "external_board_bridge.py" in out.stdout
