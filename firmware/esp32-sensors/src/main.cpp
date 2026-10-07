@@ -29,7 +29,13 @@
 //    "o2":{"o2_pct":20.87,"calibrated":1},                          (calibrated: CAL_O2 was done)
 //    "mq4":{"vout_mv":1240,"rs_rl":3.03,"rs_r0":1.03,"ch4_ppm":4.1,"warming":0,"calibrated":1},
 //                                                   (while warming: "warm_left_s":123, no ch4_ppm)
-//    "board":{"uptime_s":10,"reset_reason":1,"boot_count":7,"i2c_err":0,"bme_resets":0}}  (every 10 s)
+//    "board":{"uptime_s":10,"reset_reason":1,"boot_count":7,"i2c_err":0,"bme_resets":0,
+//             "heal_cause":0,"heal_reboots":0,"heap_free":201234,"heap_min":187654,
+//             "wifi_drops":0,"wifi_reason":0,"net_restarts":0}}  (every 10 s)
+//      heal_cause: why THIS boot happened when the firmware rebooted itself (0 it didn't,
+//      1 I2C bus stall, 2 Wi-Fi lost, 3 nobody polling, 4 memory low); heal_reboots: total
+//      self-heal reboots since flashing; wifi_reason: why the Wi-Fi link last dropped (ESP-IDF
+//      wifi_err_reason_t: 8 left, 15 handshake timeout, 200 beacon timeout, 201 no AP found …)
 // Lines starting with '#' are diagnostics.
 //
 // Fault tolerance:
@@ -38,6 +44,15 @@
 //     so the MCC sees a crash, a watchdog reset or a brownout (supply dip) for what it is
 //   - I2C bus recovery: when every transaction fails for a while (a device holding SDA low),
 //     SCL is clocked 9 times to free the bus, a STOP is sent and the sensors are set up again
+//   - network self-recovery (the task watchdog can't see it: the loop keeps running while the
+//     board is unreachable). Without rebooting first, so the gap is only the outage itself:
+//       Wi-Fi down 20 s          → rejoin the network (every 20 s)
+//       Wi-Fi down 3 min         → reboot (once per outage: a router that is off is waited for)
+//       connected, not polled 5 min  → restart the web server and mDNS name
+//       not polled 15 min        → reboot (once, until the Pi polls again)
+//       free memory < 16 KB      → reboot before the network stack runs out
+//     Every self-heal reboot is remembered across it and reported as heal_cause, so the data
+//     says when and why the board restarted.
 //
 // Warm-up, only where physics needs it:
 //   - MQ-4: 3 min heater warm-up after a real power-on (or brownout). After a watchdog, crash,
@@ -81,6 +96,20 @@ static const uint32_t STALL_RECOVER_MS = 45000, STALL_REBOOT_MS = 120000;
 static uint32_t lastI2cOkMs = 0, lastStallRecover = 0;
 static bool i2cEverOk = false, stallRebooted = false;
 static bool scdEnabled = true;                   // SCD_OFF stops the firmware touching a faulty SCD40
+// Network self-recovery: the Pi polls /json every second, so a board it can't reach is losing data
+// while the loop (and the task watchdog) carry on as if all were well. Mend the link without a
+// reboot where possible; reboot as the last resort, and record why (heal_cause) so the data shows it.
+static const uint32_t WIFI_REJOIN_MS = 20000, WIFI_REBOOT_MS = 180000;
+static const uint32_t POLL_RESTART_MS = 300000, POLL_REBOOT_MS = 900000;
+static const uint32_t HEAP_REBOOT_BYTES = 16384, HEAP_CHECK_AFTER_MS = 600000;
+enum HealCause { HEAL_NONE = 0, HEAL_I2C = 1, HEAL_WIFI = 2, HEAL_POLL = 3, HEAL_HEAP = 4 };
+static int healCause = HEAL_NONE;                // why this boot happened, if the firmware rebooted itself
+static uint32_t healReboots = 0;                 // self-heal reboots since flashing (flash)
+static uint32_t wifiDownSince = 0, lastRejoin = 0, lastPollMs = 0;
+static bool wifiWasUp = false, wifiWait = false, pollWait = false, pollRestarted = false, heapRebooted = false;
+static uint32_t wifiDrops = 0, netRestarts = 0;
+static volatile int wifiReason = 0;              // latest Wi-Fi disconnect reason (wifi_err_reason_t)
+static int dropReason = 0;                       // the reason the link last went down (not our own rejoins)
 static const uint32_t WDT_TIMEOUT_S = 10;
 static const int I2C_STUCK_STREAK = 20;         // consecutive failed transactions before a bus recovery
 
@@ -644,11 +673,16 @@ static const char PAGE[] =
 // The web server can only start once Wi-Fi has brought the network stack (lwIP) up: starting it
 // earlier makes the ESP32 abort ("tcpip_api_call: Invalid mbox") and reboot, over and over.
 static bool webStarted = false;
+static void polled();
 
 static void webStart() {
   if (webStarted) return;
   web.on("/", [] { web.send(200, "text/html", PAGE); });
-  web.on("/json", [] { web.sendHeader("Access-Control-Allow-Origin", "*"); web.send(200, "application/json", lastLine); });
+  web.on("/json", [] {
+    web.sendHeader("Access-Control-Allow-Origin", "*");
+    web.send(200, "application/json", lastLine);
+    polled();
+  });
   web.begin();
   webStarted = true;
 }
@@ -657,6 +691,8 @@ static void wifiStart() {
   if (!wifiSsid[0]) return;
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);                 // no modem sleep: missed router beacons drop the link, and a
+                                        // server that sleeps answers late; ~80 mA more, mains-powered
   WiFi.setHostname("imm-sensors");
   WiFi.begin(wifiSsid, wifiPass);
   webStart();
@@ -680,15 +716,95 @@ static void mdnsTick() {
   }
 }
 
+// ── network self-recovery ───────────────────────────────────────────
+// A reboot the firmware chose: say why on USB, remember the cause across it (NVS: the next boot
+// reports it as heal_cause, so the data shows when and why), then restart. A reboot keeps the
+// MQ-4 hot (reset reason 3: no warm-up) and BNO055 calibration, so it costs ~10 s of data.
+static void healReboot(int cause, const char* why) {
+  prefs.putUInt("heal", (uint32_t)cause);
+  prefs.putUInt("heals", healReboots + 1);
+  diag(why);
+  Serial.flush();
+  esp_restart();
+}
+
+// The Pi read /json: the board is reachable. Re-arm the poll recovery.
+static void polled() {
+  lastPollMs = millis();
+  pollRestarted = false;
+  if (pollWait) { pollWait = false; prefs.putUInt("poll_wait", 0); }
+}
+
+static void networkTick(uint32_t now) {
+  if (!wifiSsid[0]) return;                                    // USB only: nothing to mend
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiWasUp && wifiDownSince) {
+      char m[96];
+      snprintf(m, sizeof m, "wifi: back after %lu s", (unsigned long)((now - wifiDownSince) / 1000));
+      diag(m);
+    }
+    wifiWasUp = true;
+    wifiDownSince = 0;
+    if (wifiWait) { wifiWait = false; prefs.putUInt("wifi_wait", 0); }
+    // Connected, but the Pi hasn't read /json for minutes: the web server or the mDNS name
+    // stopped answering (the board looks fine from here). Restart both, then reboot as a last resort.
+    if (now - lastPollMs >= POLL_RESTART_MS && !pollRestarted) {
+      pollRestarted = true;
+      ++netRestarts;
+      web.stop();
+      web.begin();
+      MDNS.end();
+      mdnsStarted = false;                                     // mdnsTick announces the name again
+      diag("self-heal: not polled for 5 min; web server and mDNS name restarted");
+    }
+    if (now - lastPollMs >= POLL_REBOOT_MS && !pollWait) {
+      pollWait = true;                                         // once, until the Pi polls again: a Pi
+      prefs.putUInt("poll_wait", 1);                           // that is off must not cause a reboot loop
+      healReboot(HEAL_POLL, "self-heal: still not polled after 15 min; rebooting");
+      return;
+    }
+  } else {
+    if (wifiWasUp) {
+      wifiWasUp = false;
+      ++wifiDrops;
+      dropReason = wifiReason;
+      char m[96];
+      snprintf(m, sizeof m, "wifi: link lost (reason %d); rejoining", dropReason);
+      diag(m);
+    }
+    if (!wifiDownSince) wifiDownSince = now ? now : 1;
+    lastPollMs = now;                                          // not "unpolled" while the link is down
+    if (now - wifiDownSince >= WIFI_REBOOT_MS && !wifiWait) {
+      wifiWait = true;                                         // once per outage: a router that is off
+      prefs.putUInt("wifi_wait", 1);                           // is waited for, not rebooted against
+      healReboot(HEAL_WIFI, "self-heal: Wi-Fi still down after 3 min; rebooting");
+      return;
+    }
+    if (now - wifiDownSince >= WIFI_REJOIN_MS && now - lastRejoin >= WIFI_REJOIN_MS) {
+      lastRejoin = now;
+      WiFi.disconnect();                                       // the driver's own reconnect can give up
+      WiFi.begin(wifiSsid, wifiPass);                          // after some disconnect reasons: start over
+    }
+  }
+  if (now >= HEAP_CHECK_AFTER_MS && !heapRebooted && esp_get_free_heap_size() < HEAP_REBOOT_BYTES) {
+    heapRebooted = true;
+    healReboot(HEAL_HEAP, "self-heal: free memory below 16 KB; rebooting before the network stack fails");
+  }
+}
+
 static void handleCommand() {
   cmd[cmdLen] = 0;
   for (char* p = cmd; *p && *p != ' '; p++) *p = (char)toupper(*p);   // the command word is case-insensitive;
                                                                        // Wi-Fi name and password keep their case
   if (strcmp(cmd, "STATUS") == 0) {
     status();
-    char b[120];
+    char b[240];
     snprintf(b, sizeof b, "wifi: %s ip=%s", wifiSsid[0] ? (WiFi.status() == WL_CONNECTED ? "connected" : "connecting") : "off",
              WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "-");
+    diag(b);
+    snprintf(b, sizeof b, "network: %lu Wi-Fi drop(s) (reason %d, latest %d), %lu web/mDNS restart(s), %lu self-heal "
+             "reboot(s) since flashing, this start: %d, free memory %lu B", (unsigned long)wifiDrops, dropReason, (int)wifiReason,
+             (unsigned long)netRestarts, (unsigned long)healReboots, healCause, (unsigned long)esp_get_free_heap_size());
     diag(b);
   } else if (strncmp(cmd, "WIFI_SSID ", 10) == 0) {                  // rest of the line: spaces allowed
     snprintf(wifiSsid, sizeof wifiSsid, "%s", cmd + 10);
@@ -753,6 +869,15 @@ void setup() {
   prefs.begin("imm-mq4", false);
   mq4R0 = prefs.isKey("r0") ? prefs.getFloat("r0", 0) : 0;   // isKey: no "NOT_FOUND" error log before CAL_MQ4
   scdEnabled = prefs.getUInt("scd_off", 0) == 0;            // remembered across restarts
+  {
+    // A self-heal reboot is a software reset (3); anything else (power cut, RESET button) wasn't ours
+    const uint32_t cause = prefs.getUInt("heal", 0);
+    healCause = resetReason == 3 ? (int)cause : HEAL_NONE;
+    if (cause) prefs.putUInt("heal", 0);
+    healReboots = prefs.getUInt("heals", 0);
+    wifiWait = prefs.getUInt("wifi_wait", 0) != 0;
+    pollWait = prefs.getUInt("poll_wait", 0) != 0;
+  }
   bnoPrefs.begin("imm-bno", false);
   wifiPrefs.begin("imm-wifi", false);
   snprintf(wifiSsid, sizeof wifiSsid, "%s", wifiPrefs.getString("ssid", "").c_str());
@@ -762,9 +887,17 @@ void setup() {
   mq4WarmupMs = resetReason >= 2 && resetReason <= 8 ? 0 : MQ4_WARMUP_MS;
   delay(800);                           // BNO055 boot time after power-up
   diag("IMM-OS ESP32 sensor board started");
+  if (healCause) {
+    static const char* const why[] = {"", "I2C bus stall", "Wi-Fi lost", "not polled", "memory low"};
+    char m[80];
+    snprintf(m, sizeof m, "self-heal: this start was a self-heal reboot (%s)", healCause <= 4 ? why[healCause] : "?");
+    diag(m);
+  }
   diag(mq4WarmupMs ? "mq4: heater warming up for 3 min" : "mq4: heater stayed powered through this reset: no warm-up");
   findSensors();
   status();
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) { wifiReason = info.wifi_sta_disconnected.reason; },
+               ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   wifiStart();
   if (wifiSsid[0]) diag("wifi: connecting (STATUS shows the IP)");
   lastProbe = millis();
@@ -773,7 +906,7 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();
-  if (webStarted) { web.handleClient(); mdnsTick(); }
+  if (webStarted) { web.handleClient(); mdnsTick(); networkTick(millis()); }
   while (Serial.available()) {
     const int c = Serial.read();
     if (c == '\n' || c == '\r') handleCommand();
@@ -797,9 +930,7 @@ void loop() {
     }
     if (now - lastI2cOkMs > STALL_REBOOT_MS && !stallRebooted) {
       stallRebooted = true;
-      diag("self-heal: I2C sensors still silent; rebooting to clear the bus");
-      Serial.flush();
-      esp_restart();
+      healReboot(HEAL_I2C, "self-heal: I2C sensors still silent; rebooting to clear the bus");
       return;
     }
   }
@@ -882,6 +1013,12 @@ void loop() {
     n += snprintf(line + n, sizeof line - n,
                   ",\"board\":{\"uptime_s\":%lu,\"reset_reason\":%d,\"boot_count\":%lu,\"i2c_err\":%lu,\"bme_resets\":%d",
                   (unsigned long)(now / 1000), resetReason, (unsigned long)bootCount, (unsigned long)i2cErr, bmeResets);
+    n += snprintf(line + n, sizeof line - n,
+                  ",\"heal_cause\":%d,\"heal_reboots\":%lu,\"heap_free\":%lu,\"heap_min\":%lu,"
+                  "\"wifi_drops\":%lu,\"wifi_reason\":%d,\"net_restarts\":%lu",
+                  healCause, (unsigned long)healReboots, (unsigned long)esp_get_free_heap_size(),
+                  (unsigned long)esp_get_minimum_free_heap_size(), (unsigned long)wifiDrops, dropReason,
+                  (unsigned long)netRestarts);
     if (WiFi.status() == WL_CONNECTED) n += snprintf(line + n, sizeof line - n, ",\"rssi_dbm\":%d", (int)WiFi.RSSI());
     n += snprintf(line + n, sizeof line - n, "}");
   }

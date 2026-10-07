@@ -186,7 +186,9 @@ def test_scd40_co2_zero_is_left_out(sim, tmp_path):
 def test_board_health_reset_reason_and_boot_count(sim, tmp_path):
     data, notes = sim("resetreason 9\n" + BASE + "run 21\nreset\nrun 1\n", tmp_path)
     boards = [d["board"] for d in data if "board" in d]
-    assert boards[0] == {"uptime_s": boards[0]["uptime_s"], "reset_reason": 9, "boot_count": 1, "i2c_err": 0, "bme_resets": 0}
+    assert boards[0] == {"uptime_s": boards[0]["uptime_s"], "reset_reason": 9, "boot_count": 1, "i2c_err": 0, "bme_resets": 0,
+                         "heal_cause": 0, "heal_reboots": 0, "heap_free": 200000, "heap_min": 180000,
+                         "wifi_drops": 0, "wifi_reason": 0, "net_restarts": 0}
     assert len(boards) >= 3                                       # every 10 s, and in the first line after a boot
     assert boards[-1]["boot_count"] == 2                          # counted in flash across the reset
     assert any("BROWNOUT" in n for n in notes)                    # STATUS at boot explains reason 9
@@ -352,3 +354,79 @@ def test_wifi_remembered_across_restart_and_forgotten(sim, tmp_path):
 def test_commands_still_case_insensitive(sim, tmp_path):
     _, notes = sim(BASE + "run 1\nsend cal_o2\nrun 1\n", tmp_path)
     assert "# CAL_O2: SEN0322 set to 20.9 % (fresh air)" in notes
+
+
+# ── network self-recovery (board alive but unreachable: the task watchdog can't see it) ──
+
+NET = BASE + "remove scd\nsend WIFI_SSID Net\nsend WIFI_PASS pw\nrun 2\npoll\n"
+
+
+def _boards(data):
+    return [d["board"] for d in data if "board" in d]
+
+
+def test_short_wifi_drop_is_mended_by_rejoining_without_a_reboot(sim, tmp_path):
+    data, notes = sim(NET + "wifidrop 8\nrun 25\nreboots\nnet\n", tmp_path)
+    assert "# wifi: link lost (reason 8); rejoining" in notes
+    assert "# wifi: back after 20 s" in notes
+    assert "REBOOTS 0" in notes                                 # no reboot: the gap is only the outage
+    assert "NET begins=2 web=1 sleep=0" in notes                # rejoined once; modem sleep off
+    b = _boards(data)[-1]
+    assert b["wifi_drops"] == 1 and b["wifi_reason"] == 8 and b["heal_cause"] == 0
+
+
+def test_wifi_that_stays_down_reboots_once_and_the_next_boot_says_why(sim, tmp_path):
+    data, notes = sim(NET + "wifiblock 1\nwifidrop 201\nrun 185\nreboots\nnvs heal\n"
+                      "resetreason 3\nreset\nrun 200\nreboots\nwifiblock 0\nrun 21\nnvs wifi_wait\nrun 10\n", tmp_path)
+    assert "# self-heal: Wi-Fi still down after 3 min; rebooting" in notes
+    assert notes.count("REBOOTS 1") == 1 and "NVS heal 2" in notes
+    assert "# self-heal: this start was a self-heal reboot (Wi-Fi lost)" in notes
+    assert "REBOOTS 0" in notes                                 # router still off: waited for, no reboot loop
+    assert "NVS wifi_wait 0" in notes                           # re-armed once the board is back on the network
+    b = _boards(data)[-1]
+    assert (b["reset_reason"], b["boot_count"], b["heal_cause"], b["heal_reboots"]) == (3, 2, 2, 1)
+
+
+def test_not_polled_restarts_web_and_mdns_then_reboots_once(sim, tmp_path):
+    data, notes = sim(NET + "run 301\nnet\nrun 600\nreboots\nresetreason 3\nreset\nrun 1000\nreboots\npoll\nnvs poll_wait\n",
+                      tmp_path)
+    assert "# self-heal: not polled for 5 min; web server and mDNS name restarted" in notes
+    assert "NET begins=1 web=2 sleep=0" in notes                # web server restarted, no reboot yet
+    assert "# self-heal: still not polled after 15 min; rebooting" in notes
+    assert "REBOOTS 1" in notes and "REBOOTS 0" in notes        # a Pi that is off: one reboot, not a loop
+    assert "NVS poll_wait 0" in notes                           # the next poll re-arms it
+    assert _boards(data)[-1]["heal_cause"] == 3
+
+
+def test_low_memory_reboots_after_ten_minutes(sim, tmp_path):
+    _, notes = sim(NET + "heap 12000\nrun 300\nreboots\nrun 350\nreboots\nnvs heal\n", tmp_path)
+    assert "REBOOTS 0" in notes                                 # not in the first 10 min (no boot loop)
+    assert "# self-heal: free memory below 16 KB; rebooting before the network stack fails" in notes
+    assert "REBOOTS 1" in notes and "NVS heal 4" in notes
+
+
+def test_healthy_polled_board_is_left_alone_and_reports_memory(sim, tmp_path):
+    data, notes = sim(NET + "run 1\npoll\n" * 1200 + "reboots\nnet\n", tmp_path)
+    assert not any("self-heal" in n or "link lost" in n for n in notes)
+    assert "REBOOTS 0" in notes and "NET begins=1 web=1 sleep=0" in notes
+    b = _boards(data)[-1]
+    assert b["heap_free"] == 200000 and b["heap_min"] == 180000 and b["net_restarts"] == 0
+
+
+def test_reset_button_or_power_cut_is_not_labelled_a_self_heal(sim, tmp_path):
+    data, _ = sim(NET + "wifiblock 1\nwifidrop 2\nrun 185\nresetreason 2\nreset\nrun 11\n", tmp_path)
+    b = _boards(data)[-1]
+    assert b["reset_reason"] == 2 and b["heal_cause"] == 0
+
+
+def test_i2c_stall_reboot_is_labelled_too(sim, tmp_path):
+    data, _ = sim(BASE + "run 5\nremove bme\nremove scd\nremove bno\nremove o2\nrun 130\nresetreason 3\nreset\nrun 11\n",
+                  tmp_path)
+    assert _boards(data)[-1]["heal_cause"] == 1
+
+
+def test_wifi_reason_is_why_the_link_dropped_not_the_firmwares_own_rejoin(sim, tmp_path):
+    # the rejoin's own disconnect raises reason 8 (left); the drop's reason (200 beacon timeout) is kept
+    data, notes = sim(NET + "wifiblock 1\nwifidrop 200\nrun 1\nwifidrop 8\nrun 15\nsend STATUS\nrun 1\n", tmp_path)
+    assert _boards(data)[-1]["wifi_reason"] == 200
+    assert any(n.startswith("# network: 1 Wi-Fi drop(s) (reason 200, latest 8)") for n in notes)

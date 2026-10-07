@@ -173,11 +173,11 @@ def test_wifi_polling_publishes_each_line_once(capsys):
             raise r
         return r
     sent = []
-    esp32_bridge.run_http("http://esp/json", lambda p, t: sent.append((t, p)), now=lambda: 5.0, sleep=lambda s: None,
+    esp32_bridge.run_http("http://192.0.2.7/json", lambda p, t: sent.append((t, p)), now=lambda: 5.0, sleep=lambda s: None,
                     fetch=fetch, max_loops=4)
     assert [t for t, _ in sent].count("habitat/sensors/bme280/zone1") == 2      # the repeat isn't published
     assert next(p for t, p in sent if t.startswith("habitat/sensors/board"))["rssi_dbm"] == -61
-    assert "not answering at http://esp/json" in capsys.readouterr().err
+    assert "not answering at http://192.0.2.7/json: no answer (timed out)" in capsys.readouterr().err
 
 
 def test_send_keeps_wifi_name_and_password_case():
@@ -220,3 +220,74 @@ def test_send_keeps_listening_through_a_board_reset(capsys):
     assert esp32_bridge.send(Ser(), "WIFI_PASS x", listen_s=0.5) == 0
     out = capsys.readouterr().out
     assert "still listening" in out and "wifi: stored, connecting" in out
+
+
+# ── Wi-Fi: the mDNS name, failure kinds, self-heal reboots ───────────
+
+WIFI_LINE = {"ms": 1000, "bme280": {"temp": 24.5, "hum": 41.2, "pres": 1008.4},
+        "board": {"uptime_s": 10, "reset_reason": 1, "boot_count": 2, "i2c_err": 0, "bme_resets": 0}}
+
+
+def test_name_that_stops_resolving_keeps_polling_the_last_ip(capsys):
+    import socket
+    answers = ["192.168.1.126", socket.gaierror(-2, "Name or service not known"), socket.gaierror(-2, "x")]
+
+    def resolve(host):
+        assert host == "imm-sensors.local"
+        a = answers.pop(0) if answers else "192.168.1.126"
+        if isinstance(a, Exception):
+            raise a
+        return a
+    t = [0.0]
+    addr = esp32_bridge.BoardAddress("http://imm-sensors.local/json", resolve=resolve, clock=lambda: t[0])
+    assert addr.target() == "http://192.168.1.126/json"
+    t[0] = 61.0                                                    # time to look the name up again: it fails
+    assert addr.target() == "http://192.168.1.126/json"            # ... and the last IP is kept
+    assert "imm-sensors.local stopped resolving" in capsys.readouterr().err
+    t[0] = 65.0
+    assert addr.target() == "http://192.168.1.126/json"            # not asked again for 10 s
+    t[0] = 72.0
+    assert addr.target() == "http://192.168.1.126/json"            # still failing, still the last IP
+    t[0] = 83.0
+    assert addr.target() == "http://192.168.1.126/json"
+    assert "resolves again" in capsys.readouterr().err
+
+
+def test_board_with_a_new_ip_is_found_after_a_failed_poll(capsys):
+    ips = ["192.168.1.126", "192.168.1.140"]
+    addr = esp32_bridge.BoardAddress("http://imm-sensors.local/json", resolve=lambda h: ips[0], clock=lambda: 0.0)
+    assert addr.target() == "http://192.168.1.126/json"
+    ips.pop(0)
+    addr.failed()                                                  # the old IP stopped answering
+    assert addr.target() == "http://192.168.1.140/json"
+    assert "now at 192.168.1.140 (was 192.168.1.126)" in capsys.readouterr().err
+
+
+def test_ip_url_is_used_as_it_is():
+    addr = esp32_bridge.BoardAddress("http://192.168.1.126:8080/json", resolve=lambda h: 1 / 0)
+    assert addr.target() == "http://192.168.1.126:8080/json"
+
+
+def test_failure_kinds_tell_the_faults_apart():
+    import socket
+    import urllib.error
+    kind = esp32_bridge.failure_kind
+    assert kind(urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))).startswith("name not resolving")
+    assert kind(urllib.error.URLError(socket.timeout("timed out"))).startswith("no answer")
+    assert kind(TimeoutError("timed out")).startswith("no answer")
+    assert kind(urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))).startswith("refused")
+    assert kind(urllib.error.URLError(OSError(113, "No route to host"))).startswith("no route")
+
+
+def test_self_heal_reboot_is_logged_with_its_cause_and_new_fields_published(capsys):
+    after = {"ms": 500, "bme280": WIFI_LINE["bme280"],
+             "board": {"uptime_s": 1, "reset_reason": 3, "boot_count": 3, "i2c_err": 0, "bme_resets": 0,
+                       "heal_cause": 2, "heal_reboots": 1, "heap_free": 201234, "heap_min": 187654,
+                       "wifi_drops": 0, "wifi_reason": 0, "net_restarts": 0}}
+    replies = [WIFI_LINE, after]
+    sent = []
+    esp32_bridge.run_http("http://192.0.2.7/json", lambda p, t: sent.append((t, p)), now=lambda: 5.0,
+                          sleep=lambda s: None, fetch=lambda u: replies.pop(0), max_loops=2)
+    assert "ESP32 board restarted (boot 3, reset reason 3, self-heal: Wi-Fi lost)" in capsys.readouterr().err
+    board = [p for t, p in sent if t == "habitat/sensors/board/zone1"][-1]
+    assert board["heal_cause"] == 2 and board["heap_free"] == 201234 and isinstance(board["heap_min"], int)

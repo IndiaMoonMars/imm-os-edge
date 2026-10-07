@@ -13,9 +13,12 @@ and each section is published on its own topic in the same shape as the Pi-wired
                                             grav_ms2, mag_ut, gyro_dps, temp, calib_gyro/acc/mag
     mq4     habitat/sensors/mq4/<zone>      vout_mv, rs_rl, rs_r0, ch4_ppm, warming, calibrated
                                             (rs_r0 once calibrated, ch4_ppm once also warm)
-    board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, bme_resets, rssi_dbm
+    board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, bme_resets, rssi_dbm,
+                                            heal_cause, heal_reboots, heap_free, heap_min, wifi_drops,
+                                            wifi_reason, net_restarts
                                             (every 10 s: the MCC alarms on crashes, watchdog
-                                            resets, brownouts and BME280 power losses)
+                                            resets, brownouts and BME280 power losses, and labels the
+                                            board's own self-heal reboots with their cause)
 
 dew_point_c is calculated here from temp and hum (Magnus formula). The same air has the same
 dew point wherever it is measured, so the BME280's and SCD40's should agree even when their
@@ -32,6 +35,11 @@ Lines starting with '#' are the board's diagnostics (stderr as {"info": ...}).
 Over Wi-Fi: once the board has joined the network (WIFI_SSID / WIFI_PASS over USB; STATUS shows
 its IP), set ESP32_URL=http://<board-ip>/json and the bridge polls it once a second instead of
 reading USB. Commands (--send) still go over USB.
+ESP32_URL=http://imm-sensors.local/json (the board's mDNS name) works on any router: the bridge
+polls the IP the name resolves to, and keeps polling that IP if the name stops resolving (the
+board's mDNS answer can go quiet while the board itself is fine), so that doesn't cost data.
+Each failed poll is logged with what kind of failure it was (name, no answer, refused, no route),
+which tells a board that is off the Wi-Fi from one whose web server or name stopped.
 Port: ESP32_PORT, else the first CP210x/CH340 USB-serial device. Modes: stdout | mqtt | both
 """
 import argparse
@@ -53,10 +61,13 @@ FIELDS = {
     "bno055": ("heading_deg", "roll_deg", "pitch_deg", "lin_acc_ms2", "imu_calib",
                "grav_ms2", "mag_ut", "gyro_dps", "temp", "calib_gyro", "calib_acc", "calib_mag", "cal_restored"),
     "mq4": ("vout_mv", "rs_rl", "rs_r0", "ch4_ppm", "warming", "calibrated", "warm_left_s"),
-    "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm"),
+    "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm",
+              "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts"),
 }
 INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated", "warm_left_s", "cal_restored", "asc",
-              "uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm"}
+              "uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm",
+              "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts"}
+HEAL_CAUSES = {1: "I2C bus stall", 2: "Wi-Fi lost", 3: "not polled", 4: "memory low"}
 DEW_POINT_SENSORS = ("bme280", "scd40")
 
 
@@ -133,30 +144,125 @@ def explain_mq4(value: dict, warned: set) -> None:
         print(json.dumps({"info": msg}), file=sys.stderr, flush=True)
 
 
-def run_http(url, publish_fn, now=time.time, sleep=time.sleep, fetch=None, max_loops=None):
+class BoardAddress:
+    """http://imm-sensors.local/json → the URL to poll: by the IP the name last resolved to.
+
+    The name is looked up again every RESOLVE_EVERY_S and after a failed poll. If it stops
+    resolving (the board's mDNS answer went quiet, or the Pi's avahi lost it) the last IP is kept:
+    the board almost always still has it, so the data keeps flowing instead of stopping until
+    someone presses RESET. An IP in the URL is used as it is."""
+
+    RESOLVE_EVERY_S = 60.0
+    RETRY_NAME_S = 10.0             # while the name doesn't resolve: don't wait on avahi every poll
+
+    def __init__(self, url, resolve=None, clock=time.monotonic):
+        import ipaddress
+        from urllib.parse import urlsplit
+        self.url, self.clock = url, clock
+        u = urlsplit(url)
+        self.host, self.port = u.hostname or "", u.port
+        try:
+            ipaddress.ip_address(self.host)
+            self.by_name = False
+        except ValueError:
+            self.by_name = bool(self.host)
+        self.resolve = resolve or self._getaddrinfo
+        self.ip, self.next_lookup, self.name_ok = None, 0.0, True
+
+    def _getaddrinfo(self, host):
+        import socket
+        return socket.getaddrinfo(host, self.port or 80, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+
+    def target(self) -> str:
+        if not self.by_name:
+            return self.url
+        if self.ip is None or self.clock() >= self.next_lookup:
+            self._lookup()
+        if self.ip is None:
+            return self.url
+        netloc = self.ip + (f":{self.port}" if self.port else "")
+        return self.url.replace(self.host + (f":{self.port}" if self.port else ""), netloc, 1)
+
+    def _lookup(self):
+        try:
+            ip = self.resolve(self.host)
+        except OSError as e:                     # socket.gaierror: the name doesn't resolve
+            if self.name_ok:
+                msg = (f"{self.host} stopped resolving ({e}); polling its last IP {self.ip}" if self.ip
+                       else f"{self.host} doesn't resolve ({e})")
+                print(json.dumps({"error": msg}), file=sys.stderr, flush=True)
+            self.name_ok = False
+            self.next_lookup = self.clock() + self.RETRY_NAME_S
+            return
+        if self.ip and ip != self.ip:
+            print(json.dumps({"info": f"{self.host} is now at {ip} (was {self.ip})"}), file=sys.stderr, flush=True)
+        elif not self.name_ok:
+            print(json.dumps({"info": f"{self.host} resolves again ({ip})"}), file=sys.stderr, flush=True)
+        self.ip, self.name_ok = ip, True
+        self.next_lookup = self.clock() + self.RESOLVE_EVERY_S
+
+    def failed(self):
+        """A poll failed: look the name up again before the next one (the IP may have changed)."""
+        if self.name_ok:
+            self.next_lookup = 0.0
+
+
+def failure_kind(e) -> str:
+    """What a failed poll means, in words: the journal then says which fault it was."""
+    import errno
+    import socket
+    inner = getattr(e, "reason", e)              # urllib wraps the socket error
+    text = str(e).lower()
+    if isinstance(inner, socket.gaierror) or "name or service not known" in text or "name resolution" in text:
+        return "name not resolving (mDNS)"
+    if isinstance(inner, (socket.timeout, TimeoutError)) or "timed out" in text:
+        return "no answer (timed out): board off the Wi-Fi, without power, or frozen"
+    if isinstance(inner, ConnectionRefusedError) or "refused" in text:
+        return "refused: board on the network, its web server down"
+    if getattr(inner, "errno", None) in (errno.EHOSTUNREACH, errno.ENETUNREACH) or "no route" in text:
+        return "no route to host: board not on the Wi-Fi"
+    return "error"
+
+
+def run_http(url, publish_fn, now=time.time, sleep=time.sleep, fetch=None, max_loops=None, address=None,
+             clock=time.monotonic):
     """Poll the board's /json over Wi-Fi once a second (the same line it prints on USB)."""
     import urllib.error
     from external_board_bridge import FETCH_ERRORS, Dedup, poll_http
     import watchdog
     fetch = fetch or poll_http
-    dedup, warned, failing, n = Dedup(), set(), 0, 0
+    address = address or BoardAddress(url, clock=clock)
+    dedup, warned, failing, n, down_since, boot = Dedup(), set(), 0, 0, None, None
     while max_loops is None or n < max_loops:
         n += 1
         watchdog.kick()                 # alive while the board is away (reported, not restarted)
+        target = address.target()
         try:
-            line = fetch(url)
+            line = fetch(target)
             if failing:
-                print(json.dumps({"info": f"ESP32 board reachable again after {failing} failed poll(s)"}),
-                      file=sys.stderr, flush=True)
+                print(json.dumps({"info": f"ESP32 board reachable again after {failing} failed poll(s), "
+                                          f"{clock() - down_since:.0f} s"}), file=sys.stderr, flush=True)
             failing = 0
             if isinstance(line, dict) and dedup.new(line):
+                b = line.get("board")
+                if isinstance(b, dict) and isinstance(b.get("boot_count"), int):
+                    if boot is not None and b["boot_count"] != boot:
+                        cause = HEAL_CAUSES.get(b.get("heal_cause") or 0)
+                        print(json.dumps({"info": f"ESP32 board restarted (boot {b['boot_count']}, reset reason "
+                                                  f"{b.get('reset_reason')}" + (f", self-heal: {cause}" if cause else "")
+                                                  + ")"}), file=sys.stderr, flush=True)
+                    boot = b["boot_count"]
                 for topic, payload in to_payloads(line, now()):
                     publish_fn(payload, topic)
                 explain_mq4(line, warned)
         except FETCH_ERRORS + (urllib.error.URLError,) as e:
             failing += 1
+            if failing == 1:
+                down_since = clock()
+            address.failed()
             if failing in (1, 10) or failing % 60 == 0:
-                print(json.dumps({"error": f"ESP32 board not answering at {url}: {e}"}), file=sys.stderr, flush=True)
+                print(json.dumps({"error": f"ESP32 board not answering at {target}: {failure_kind(e)} ({e})"}),
+                      file=sys.stderr, flush=True)
         sleep(1.0)
 
 
