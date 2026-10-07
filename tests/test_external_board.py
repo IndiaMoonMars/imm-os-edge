@@ -370,3 +370,23 @@ def test_internal_reader_never_takes_a_port_the_external_board_was_heard_on():
     assert hw.esp32_port({}, find) == ports[0]                                     # first found: the wrong board
     assert hw.esp32_port({"EXT_BOARD_USB": ports[0]}, find) == ports[1]          # read over Wi-Fi, still skipped
     assert hw.esp32_port({"EXT_BOARD_PORT": ports[0]}, find) == ports[1]
+
+
+def test_listen_does_not_restart_an_internal_board_that_is_already_talking():
+    class Talking(FakeSerial):
+        def __init__(self):
+            super().__init__(['{"ms":5000,"bme280":{"temp":28.7,"hum":29.0,"pres":1010.8},"o2":{"o2_pct":20.6}}\r\n'])
+            self.pins = []
+
+        def __setattr__(self, k, v):
+            if k in ("dtr", "rts"):
+                self.pins.append((k, v))
+            object.__setattr__(self, k, v)
+    ser = Talking()
+    lines = []
+    port = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
+    assert eb.listen(port, seconds=0.2, out=lines.append, users=lambda p: [], reset=True,
+                     opener=lambda p, b: ser)[0] == 0
+    assert f"  ✓ internal sensor board: ESP32_PORT={port}" in lines
+    assert ("rts", True) not in ser.pins                    # never restarted (no MQ-4 warm-up, no gap)
+    assert not any("restarting" in ln for ln in lines)

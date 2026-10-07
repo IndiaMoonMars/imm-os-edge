@@ -472,6 +472,16 @@ def reset_board(ser, sleep=time.sleep):
     ser.rts = False
 
 
+def _internal_lines(ser, seconds: float) -> bool:
+    """Does the board on ser print the internal sensor board's JSON within seconds (no restart)?"""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        ln = ser.readline().decode("utf-8", "replace")
+        if '"bme280"' in ln or '"scd40"' in ln or '"bno055"' in ln:
+            return True
+    return False
+
+
 def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_users, reset=False,
            probe_fn=None) -> tuple:
     """Read a USB serial port at the usual speeds and show what the board prints.
@@ -506,6 +516,14 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
             return 0, None
         lines, col, best = [], LineCollector(), None
         if reset and baud == 115200:
+            # A board that is already talking needs no restart: the internal sensor board prints its JSON
+            # every second, and restarting it costs its MQ-4 warm-up and a restart in the data.
+            first = _internal_lines(ser, min(seconds, 3.0))
+            if first:
+                ser.close()
+                out("  · this is the INTERNAL sensor board (BME280/SCD40/…), not the external one")
+                out(f"  ✓ internal sensor board: ESP32_PORT={port}")
+                return 0, None
             out("  · restarting the ESP32 over USB (its start-up message comes at 115200 baud) …")
             reset_board(ser)
         end = time.monotonic() + (seconds if baud == 115200 else min(seconds, 3.0))   # the usual speed gets longest
