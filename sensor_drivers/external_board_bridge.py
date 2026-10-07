@@ -430,7 +430,11 @@ def serial_ports(find=None, real=os.path.realpath):
     by_id = sorted(find("/dev/serial/by-id/*"))
     if by_id and len({real(p) for p in by_id}) >= len(ttys):
         return by_id
-    by_path = sorted(find("/dev/serial/by-path/*"))
+    by_path, seen = [], set()
+    for p in sorted(find("/dev/serial/by-path/*")):         # the Pi 5 names each port twice (usb- and usbv2-)
+        if real(p) not in seen:
+            seen.add(real(p))
+            by_path.append(p)
     return by_path or by_id or ttys
 
 

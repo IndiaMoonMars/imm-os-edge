@@ -308,5 +308,14 @@ def test_usb_ports_by_board_or_by_socket():
     two = list(real)[1:]
     assert eb.serial_ports(finder(two), real=real.get) == sorted(two)
     # two identical CH340s: one by-id name for both boards, so they are named by socket
+    real.update({by_path[0]: "/dev/ttyUSB0", by_path[1]: "/dev/ttyUSB1"})
     assert eb.serial_ports(finder(list(real)[:1]), real=real.get) == by_path
+    # the Pi 5 lists each socket twice (usb- and usbv2-): one name per board
+    pi5 = ["/dev/serial/by-path/platform-xhci-hcd.0-usb-0:1:1.0-port0", "/dev/serial/by-path/platform-xhci-hcd.0-usbv2-0:1:1.0-port0",
+           "/dev/serial/by-path/platform-xhci-hcd.1-usb-0:1:1.0-port0", "/dev/serial/by-path/platform-xhci-hcd.1-usbv2-0:1:1.0-port0"]
+    r = {pi5[0]: "/dev/ttyUSB0", pi5[1]: "/dev/ttyUSB0", pi5[2]: "/dev/ttyUSB1", pi5[3]: "/dev/ttyUSB1",
+         "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0": "/dev/ttyUSB1"}
+    f = lambda pat: (["/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"]   # noqa: E731
+                     if "by-id" in pat else pi5 if "by-path" in pat else ["/dev/ttyUSB0", "/dev/ttyUSB1"] if "ttyUSB" in pat else [])
+    assert eb.serial_ports(f, real=r.get) == [pi5[0], pi5[2]]
     assert eb.serial_ports(lambda pat: ["/dev/ttyUSB0"] if "ttyUSB" in pat else []) == ["/dev/ttyUSB0"]
