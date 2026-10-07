@@ -545,6 +545,8 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
             for url in dict.fromkeys(re.findall(r"https?://\d+\.\d+\.\d+\.\d+(?::\d+)?[^\s\"']*", " ".join(lines))):
                 out(f"  · the board says it serves {url}: reading it over Wi-Fi")
                 if probe_fn(url, out=out):
+                    # still on this USB port, though read over Wi-Fi: the internal board's reader must not take it
+                    out(f"  ✓ external board's USB port: EXT_BOARD_USB={port}")
                     return 0, None
             out("  · read the board over Wi-Fi instead (--find / --probe http://<board-ip>/)")
             return 0, None

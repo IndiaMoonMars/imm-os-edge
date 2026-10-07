@@ -369,6 +369,9 @@ if [ -n "$EXT_BOARD" ]; then
                 ok "external board on ${found% *} at ${found#* } baud"
             elif [ -n "$EXT_BOARD" ]; then
                 ok "external board: its sketch prints no readings on USB, but serves them at $EXT_BOARD"
+                ext_usb=$(echo "$heard" | sed -n "s/.*external board's USB port: EXT_BOARD_USB=\([^ ]*\).*/\1/p" | head -1)
+                # plugged in, read over Wi-Fi: keep the internal board's reader off its port
+                [ -z "$ext_usb" ] || updates+=("EXT_BOARD_USB=$ext_usb")
             else
                 die "external board not recognised on USB (see its output above). If it says 'no USB serial device', the Pi sees no board on USB at all: check with lsusb (runbook 5.6). Nothing was changed; the readers carry on as before."
             fi ;;

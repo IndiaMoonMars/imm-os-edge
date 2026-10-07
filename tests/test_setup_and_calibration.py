@@ -221,3 +221,18 @@ def test_setup_both_boards_on_usb_pins_both_ports(tmp_path, monkeypatch):
     assert "EXT_BOARD_PORT=/dev/serial/by-path/platform-xhci-hcd.1-usb-0:2:1.0-port0" in out.stdout
     assert "ESP32_URL=" in out.stdout and "EXT_BOARD_URL=" in out.stdout          # Wi-Fi addresses cleared
     assert "esp32_bridge.py" in out.stdout and "external_board_bridge.py" in out.stdout
+
+
+def test_setup_external_board_on_wifi_but_plugged_in_keeps_the_internal_reader_off_its_port(tmp_path, monkeypatch):
+    fake = tmp_path / "fake_bridge.py"
+    fake.write_text(
+        "print('  \\u00b7 the board says it serves http://192.168.1.125: reading it over Wi-Fi')\n"
+        "print('  \\u2713 use EXT_BOARD_URL=http://192.168.1.125/data')\n"
+        "print(\"  \\u2713 external board's USB port: EXT_BOARD_USB=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0\")\n")
+    monkeypatch.setenv("IMM_EXT_BOARD_BRIDGE", str(fake))
+    secrets = tmp_path / "secrets"
+    secrets.write_text("IMM_EDGE_CLIENT_SECRET=a\nMQTT_PASSWORD=b\n")
+    out = _setup_dry(tmp_path, "--secrets-file", str(secrets), "--int-board", "usb", "--ext-board", "usb")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "EXT_BOARD_URL=http://192.168.1.125/data" in out.stdout
+    assert "EXT_BOARD_USB=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0" in out.stdout

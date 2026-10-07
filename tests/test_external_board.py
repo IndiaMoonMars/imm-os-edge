@@ -280,6 +280,7 @@ def test_listen_reset_shows_link_works_but_sketch_is_silent():
     assert probed == ["http://192.168.1.139"]
     assert baud == 0 and ("rts", True) in ser.pins and ser.pins[-1] == ("rts", False)
     assert any("USB link works" in ln for ln in lines)
+    assert "  ✓ external board's USB port: EXT_BOARD_USB=/dev/ttyUSB1" in lines   # so the internal reader leaves it
 
 
 def test_undecodable_bytes_are_not_readable():
@@ -359,3 +360,13 @@ def test_probe_never_presses_the_boards_buttons():
     assert not [u for u in opened if u.rsplit("/", 1)[-1] in ("rescan", "demo", "zero", "trackclear", "scan")]
     assert "http://b/history" in opened and "http://b/track" in opened         # reading ones are still tried
     assert any("not opened" in ln and "/zero" in ln and "/demo" in ln for ln in lines)
+
+
+def test_internal_reader_never_takes_a_port_the_external_board_was_heard_on():
+    import hw
+    ports = ["/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0",                              # external (CH340)
+             "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"]
+    find = lambda pat: ports if "by-id" in pat else []          # noqa: E731
+    assert hw.esp32_port({}, find) == ports[0]                                     # first found: the wrong board
+    assert hw.esp32_port({"EXT_BOARD_USB": ports[0]}, find) == ports[1]          # read over Wi-Fi, still skipped
+    assert hw.esp32_port({"EXT_BOARD_PORT": ports[0]}, find) == ports[1]
