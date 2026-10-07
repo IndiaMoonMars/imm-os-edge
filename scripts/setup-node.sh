@@ -340,18 +340,20 @@ if [ -n "$EXT_BOARD" ]; then
     BRIDGE="${IMM_EXT_BOARD_BRIDGE:-$REPO/sensor_drivers/external_board_bridge.py}"   # (tests: a stand-in)
     case "$EXT_BOARD" in
         usb|/dev/*)      # on a Pi USB port: find which port, and its speed, from what it prints
-            # The running readers hold their USB ports, so nothing could be heard on them: stop them
-            # while listening (the Services step starts them again; with --no-services, done here).
+            # The board readers hold their USB ports, so nothing could be heard on them: stop them
+            # while listening, and start them again straight after, whatever was heard (a failed
+            # setup must never leave the node recording nothing).
             readers=""
             if [ "$DRY" = 0 ] && command -v systemctl >/dev/null; then
-                readers=$(systemctl list-units --no-legend --plain --state=active 'imm-sensor-pipeline@*' 2>/dev/null \
-                          | awk '{print $1}' | xargs || true)
-                [ -z "$readers" ] || { echo "  · stopping the sensor readers while listening: $readers"; systemctl stop $readers; }
+                readers=$(systemctl list-units --no-legend --plain --state=active \
+                          'imm-sensor-pipeline@esp32_bridge.py.service' 'imm-sensor-pipeline@external_board_bridge.py.service' \
+                          2>/dev/null | awk '{print $1}' | xargs || true)
+                [ -z "$readers" ] || { echo "  · pausing the board readers while listening: $readers"; systemctl stop $readers; }
             fi
             echo "  · listening to the USB serial ports for the external board …"
             ARG=""; [ "$EXT_BOARD" = usb ] || ARG="$EXT_BOARD"
             heard=$("$PYBIN" "$BRIDGE" --listen $ARG --reset 2>&1 | tee /dev/stderr || true)
-            if [ -n "$readers" ] && [ "$NO_SERVICES" = 1 ]; then systemctl start $readers; fi
+            if [ -n "$readers" ]; then systemctl start $readers; echo "  · board readers started again"; fi
             found=$(echo "$heard" | sed -n 's/.*EXT_BOARD_PORT=\([^ ]*\) EXT_BOARD_BAUD=\([0-9]*\).*/\1 \2/p' | head -1)
             EXT_BOARD=$(echo "$heard" | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1)
             # Both boards on USB: pin the internal one's port too, so neither reader can take the other's
@@ -368,7 +370,7 @@ if [ -n "$EXT_BOARD" ]; then
             elif [ -n "$EXT_BOARD" ]; then
                 ok "external board: its sketch prints no readings on USB, but serves them at $EXT_BOARD"
             else
-                die "external board not recognised on USB (see its output above)"
+                die "external board not recognised on USB (see its output above). If it says 'no USB serial device', the Pi sees no board on USB at all: check with lsusb (runbook 5.6). Nothing was changed; the readers carry on as before."
             fi ;;
         find)
             echo "  · looking for the external board on the local network …"
