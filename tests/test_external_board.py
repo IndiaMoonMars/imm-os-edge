@@ -319,3 +319,21 @@ def test_usb_ports_by_board_or_by_socket():
                      if "by-id" in pat else pi5 if "by-path" in pat else ["/dev/ttyUSB0", "/dev/ttyUSB1"] if "ttyUSB" in pat else [])
     assert eb.serial_ports(f, real=r.get) == [pi5[0], pi5[2]]
     assert eb.serial_ports(lambda pat: ["/dev/ttyUSB0"] if "ttyUSB" in pat else []) == ["/dev/ttyUSB0"]
+
+
+def test_listen_after_reset_still_recognises_the_internal_board():
+    # --reset: the ROM's boot lines, then the IMM-OS firmware's diagnostics and JSON; none of it has
+    # GNSS/Geiger values, which must not be taken for "a sketch that prints no readings on USB"
+    class ResettableSerial(FakeSerial):
+        dtr = rts = False
+    boot = ["rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)\r\n", "entry 0x400805b4\r\n",
+            "# IMM-OS ESP32 sensor board started\r\n",
+            "# mdns: reachable as http://imm-sensors.local/json (the name works on any router)\r\n",
+            '{"ms":1000,"bme280":{"temp":24.5,"hum":41.2,"pres":1008.4},"o2":{"o2_pct":20.9}}\r\n']
+    lines = []
+    port = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
+    baud, _ = eb.listen(port, seconds=0.2, out=lines.append, users=lambda p: [], reset=True,
+                        opener=lambda p, b: ResettableSerial(boot), probe_fn=lambda *a, **k: False)
+    assert baud == 0
+    assert f"  ✓ internal sensor board: ESP32_PORT={port}" in lines
+    assert not any("prints no readings on USB" in ln for ln in lines)

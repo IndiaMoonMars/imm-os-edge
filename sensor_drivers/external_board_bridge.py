@@ -533,6 +533,11 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
         out(f"  · {baud} baud, {len(lines)} lines, for example:")
         for ln in lines[-6:]:
             out(f"      {ln[:110]}")
+        # before the start-up check below: the internal board's lines carry no GNSS/Geiger values either
+        if any('"bme280"' in ln or '"scd40"' in ln or '"bno055"' in ln for ln in lines):
+            out("  · this is the INTERNAL sensor board (BME280/SCD40/…), not the external one")
+            out(f"  ✓ internal sensor board: ESP32_PORT={port}")
+            return 0, None
         if reset and baud == 115200 and any("rst:0x" in ln or "boot:0x" in ln for ln in lines) \
                 and not (best and score(best)):
             out("  · the USB link works (the ESP32 start-up message came through), but after it the sketch "
@@ -542,10 +547,6 @@ def listen(port: str, seconds: float = 8.0, out=print, opener=None, users=port_u
                 if probe_fn(url, out=out):
                     return 0, None
             out("  · read the board over Wi-Fi instead (--find / --probe http://<board-ip>/)")
-            return 0, None
-        if any('"bme280"' in ln or '"scd40"' in ln or '"bno055"' in ln for ln in lines):
-            out("  · this is the INTERNAL sensor board (BME280/SCD40/…), not the external one")
-            out(f"  ✓ internal sensor board: ESP32_PORT={port}")
             return 0, None
         if best and score(best):
             out(f"  · recognised: {summarise(best)}")
