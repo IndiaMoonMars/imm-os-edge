@@ -337,3 +337,25 @@ def test_listen_after_reset_still_recognises_the_internal_board():
     assert baud == 0
     assert f"  ✓ internal sensor board: ESP32_PORT={port}" in lines
     assert not any("prints no readings on USB" in ln for ln in lines)
+
+
+def test_probe_never_presses_the_boards_buttons():
+    # the radiation + GNSS board's page links to buttons as well as data: opening /zero would zero the
+    # dose, /demo switch to demo data, /trackclear clear the track, /scan start a Wi-Fi scan
+    links = ["/rescan", "/demo", "/zero", "/trackclear", "/scan", "/data", "/history", "/track"]
+    page = "<html><script>" + "".join(f"fetch('{p}');" for p in links) + "</script></html>"
+    data = '{"rad": {"cpm": 9.0, "uSvh": 0.06}, "gnss": {"sats": 0, "fix": false}}'
+    opened = []
+
+    def get(u):
+        opened.append(u)
+        if u == "http://b/":
+            return page
+        if u == "http://b/data":
+            return data
+        raise urllib.error.URLError("404")
+    lines = []
+    assert eb.probe("http://b/", get=get, out=lines.append) == "http://b/data"
+    assert not [u for u in opened if u.rsplit("/", 1)[-1] in ("rescan", "demo", "zero", "trackclear", "scan")]
+    assert "http://b/history" in opened and "http://b/track" in opened         # reading ones are still tried
+    assert any("not opened" in ln and "/zero" in ln and "/demo" in ln for ln in lines)

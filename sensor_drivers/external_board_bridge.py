@@ -570,6 +570,15 @@ _DATA_URL = re.compile(r"""(?:fetch|\$\.getJSON|\$\.get|\$\.ajax|axios\.get|Even
 _WS = re.compile(r"""new\s+WebSocket\s*\(""", re.I)
 COMMON_PATHS = ["/json", "/data", "/api", "/api/data", "/readings", "/sensors", "/sensor", "/values", "/status",
                 "/getData", "/data.json", "/sensor-data"]
+# A board's page often links to buttons as well as data (/zero, /trackclear, /demo, /rescan, /reset …):
+# opening one of those presses it. Only addresses that read are ever fetched.
+_ACTION = re.compile(r"zero|clear|reset|demo|scan|calib|reboot|restart|toggle|start|stop|set|save|delete|erase|"
+                     r"format|update|ota|upload|wifi|config|cmd|command|action|mode", re.I)
+
+
+def is_action(path: str) -> bool:
+    from urllib.parse import urlsplit
+    return bool(_ACTION.search(urlsplit(path).path.rsplit("/", 1)[-1] or ""))
 
 
 def summarise(line: dict) -> str:
@@ -601,10 +610,13 @@ def probe(url: str, mapping=None, get=get_text, out=print) -> str:
         if _WS.search(body):
             out("  · the page also uses a WebSocket: values pushed that way aren't read; "
                 "an HTTP data URL (below) or the IMM-OS firmware is needed")
+        skipped = sorted({p for p in named if is_action(p)})
+        if skipped:
+            out(f"  · not opened (they look like buttons, opening one would press it): {', '.join(skipped)}")
         tried = set()
         for path in named + COMMON_PATHS:
             u = urljoin(url, path)
-            if u in tried or u == url or u.startswith(("ws:", "wss:")):
+            if u in tried or u == url or u.startswith(("ws:", "wss:")) or is_action(path):
                 continue
             tried.add(u)
             try:

@@ -352,7 +352,7 @@ if [ -n "$EXT_BOARD" ]; then
             fi
             echo "  · listening to the USB serial ports for the external board …"
             ARG=""; [ "$EXT_BOARD" = usb ] || ARG="$EXT_BOARD"
-            heard=$("$PYBIN" "$BRIDGE" --listen $ARG --reset 2>&1 | tee /dev/stderr || true)
+            heard=$(PYTHONUNBUFFERED=1 "$PYBIN" "$BRIDGE" --listen $ARG --reset 2>&1 | tee /dev/stderr || true)
             if [ -n "$readers" ]; then systemctl start $readers; echo "  · board readers started again"; fi
             found=$(echo "$heard" | sed -n 's/.*EXT_BOARD_PORT=\([^ ]*\) EXT_BOARD_BAUD=\([0-9]*\).*/\1 \2/p' | head -1)
             EXT_BOARD=$(echo "$heard" | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1)
