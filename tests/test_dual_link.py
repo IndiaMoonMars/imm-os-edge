@@ -105,6 +105,19 @@ def test_usb_link_reads_lines_and_tells_the_board_the_pi_reads_its_usb(capsys):
     assert "bme280: re-initialising" in err
 
 
+def test_external_usb_link_tells_the_board_the_pi_reads_its_usb(capsys):
+    link = dual_link.DualLink()
+    line = {"ms": 1000, "geiger": {"cpm": 18.0, "usv_h": 0.117}}
+    ser = FakeSerial(["# unknown command (WIFI_SSID <name>, …)\r\n", json.dumps(line) + "\r\n",
+                      "# unknown command (WIFI_SSID <name>, …)\r\n", "# gnss: no TEL0157 at 0x20\r\n", ""], link)
+    eb.usb_link(link, "/dev/ttyUSB0", opener=lambda p, b: ser)
+    assert ser.written[0] == b"USB_HOST\n"
+    via, got = link.queue.get_nowait()
+    assert via == "usb" and got["geiger"]["cpm"] == 18.0
+    err = capsys.readouterr().err
+    assert err.count("predates USB_HOST") == 1 and "no TEL0157" in err
+
+
 def test_external_board_dual_dedups_by_its_uptime():
     data = {"uptime": 41, "rad": {"cpm": 18.0, "uSvh": 0.117}, "gnss": {"sats": 0, "fix": False}}
     usb_line = eb.recognise(data)                       # what its sketch would print on USB, recognised

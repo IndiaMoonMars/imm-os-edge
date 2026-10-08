@@ -87,3 +87,80 @@ def test_board_health_watchdog_and_bus_recovery(sim, tmp_path):
 def test_bus_stuck_from_boot_is_recovered_when_looking_for_the_gnss(sim, tmp_path):
     data, notes = sim("i2cstuck 5\n" + FIX + "run 3\nrun 30\n", tmp_path)
     assert "gnss" not in data[0] and "gnss" in data[-1] and any("bus recovered" in n for n in notes)
+
+
+# ── board health, as the internal board (same fields, same self-heal) ─────
+NET = "send WIFI_SSID Net\nsend WIFI_PASS pw\nrun 2\npoll\n"
+HEALTH = {"uptime_s", "reset_reason", "boot_count", "i2c_err", "heal_cause", "heal_reboots", "heap_free", "heap_min",
+          "wifi_drops", "wifi_reason", "net_restarts", "rssi_dbm"}
+
+
+def _boards(data):
+    return [d["board"] for d in data if "board" in d]
+
+
+def test_board_reports_the_same_health_fields_as_the_internal_board(sim, tmp_path):
+    data, notes = sim(NET + "run 1\nmdns\nnet\n", tmp_path)
+    assert set(_boards(data)[0]) == HEALTH
+    assert _boards(data)[0]["heap_free"] == 200000 and _boards(data)[0]["heap_min"] == 180000
+    assert "MDNS imm-external 1" in notes                       # http://imm-external.local/json
+    assert "NET begins=1 web=1 sleep=0" in notes                # modem sleep off
+
+
+def test_short_wifi_drop_is_mended_by_rejoining_without_a_reboot(sim, tmp_path):
+    data, notes = sim(NET + "wifidrop 8\nrun 25\nreboots\nnet\n", tmp_path)
+    assert "# wifi: link lost (reason 8); rejoining" in notes and "# wifi: back after 20 s" in notes
+    assert "REBOOTS 0" in notes and "NET begins=2 web=1 sleep=0" in notes
+    b = _boards(data)[-1]
+    assert b["wifi_drops"] == 1 and b["wifi_reason"] == 8 and b["heal_cause"] == 0
+
+
+def test_wifi_that_stays_down_reboots_once_and_the_next_boot_says_why(sim, tmp_path):
+    data, notes = sim(NET + "wifiblock 1\nwifidrop 201\nrun 185\nreboots\nnvs heal\n"
+                      "resetreason 3\nreset\nrun 200\nreboots\nwifiblock 0\nrun 21\nnvs wifi_wait\nrun 10\n", tmp_path)
+    assert "# self-heal: Wi-Fi still down after 3 min; rebooting" in notes
+    assert notes.count("REBOOTS 1") == 1 and "NVS heal 2" in notes
+    assert "# self-heal: this start was a self-heal reboot (Wi-Fi lost)" in notes
+    assert "REBOOTS 0" in notes                                 # router still off: waited for, no reboot loop
+    assert "NVS wifi_wait 0" in notes
+    b = _boards(data)[-1]
+    assert (b["reset_reason"], b["boot_count"], b["heal_cause"], b["heal_reboots"]) == (3, 2, 2, 1)
+
+
+def test_not_polled_restarts_web_and_mdns_then_reboots_once(sim, tmp_path):
+    data, notes = sim(NET + "run 301\nnet\nrun 600\nreboots\nresetreason 3\nreset\nrun 1000\nreboots\npoll\nnvs poll_wait\n",
+                      tmp_path)
+    assert "# self-heal: not polled for 5 min; web server and mDNS name restarted" in notes
+    assert "NET begins=1 web=2 sleep=0" in notes
+    assert "# self-heal: still not polled after 15 min; rebooting" in notes
+    assert "REBOOTS 1" in notes and "REBOOTS 0" in notes and "NVS poll_wait 0" in notes
+    assert _boards(data)[-1]["heal_cause"] == 3
+
+
+def test_low_memory_reboots_after_ten_minutes(sim, tmp_path):
+    _, notes = sim(NET + "heap 12000\nrun 300\nreboots\nrun 350\nreboots\nnvs heal\n", tmp_path)
+    assert "REBOOTS 0" in notes
+    assert "# self-heal: free memory below 16 KB; rebooting before the network stack fails" in notes
+    assert "REBOOTS 1" in notes and "NVS heal 4" in notes
+
+
+def test_reset_button_or_power_cut_is_not_labelled_a_self_heal(sim, tmp_path):
+    data, _ = sim(NET + "wifiblock 1\nwifidrop 2\nrun 185\nresetreason 2\nreset\nrun 11\n", tmp_path)
+    b = _boards(data)[-1]
+    assert b["reset_reason"] == 2 and b["heal_cause"] == 0
+
+
+def test_pi_reading_usb_means_a_wifi_outage_never_reboots_the_board(sim, tmp_path):
+    beats = "run 20\nsend USB_HOST\n" * 30                       # 10 minutes
+    data, notes = sim(NET + "send USB_HOST\nwifiblock 1\nwifidrop 201\n" + beats + "reboots\nsend STATUS\nrun 1\n", tmp_path)
+    assert "REBOOTS 0" in notes
+    assert any(n.startswith("# usb: the Pi reads this board over USB too") for n in notes)
+    assert not any(n.startswith("# unknown command") for n in notes)   # USB_HOST is silent
+    assert sum(1 for d in data if "geiger" in d) > 500
+
+
+def test_arduino_sketch_is_the_platformio_firmware():
+    """firmware/esp32-external/arduino/imm_external/imm_external.ino is for the Arduino IDE; it must not drift."""
+    with open(os.path.join(FW, "src", "main.cpp")) as a, \
+            open(os.path.join(FW, "arduino", "imm_external", "imm_external.ino")) as b:
+        assert a.read() == b.read(), "copy src/main.cpp to arduino/imm_external/imm_external.ino"

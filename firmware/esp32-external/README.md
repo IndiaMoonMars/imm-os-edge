@@ -14,8 +14,13 @@ Once a second the firmware prints one JSON line on USB serial and serves the sam
 ```json
 {"ms":61000,"geiger":{"cpm":24.0,"usv_h":0.156,"counts":24,"window_s":60,"warming":0},
  "gnss":{"fix":1,"sats":9,"lat":19.07601,"lon":72.87765,"alt_m":14.2,"sog_kn":0.03,"cog_deg":0.0,"utc":"2026-09-29T08:30:01Z"},
- "board":{"uptime_s":61,"reset_reason":1,"boot_count":3,"i2c_err":0,"rssi_dbm":-58}}
+ "board":{"uptime_s":61,"reset_reason":1,"boot_count":3,"i2c_err":0,"heal_cause":0,"heal_reboots":0,
+          "heap_free":201234,"heap_min":187654,"wifi_drops":0,"wifi_reason":0,"net_restarts":0,"rssi_dbm":-58}}
 ```
+
+`board` carries the same health fields as the internal board (`firmware/esp32-sensors`), so the MCC's
+*ESP32 board* card for zone *exterior* shows the same rows as zone_a: Wi-Fi signal, boots, reset reason,
+I²C errors, self-heal cause and reboots, Wi-Fi drops and drop reason, web restarts, free and lowest memory.
 
 On the Pi, `sensor_drivers/external_board_bridge.py` reads it, or the data of the board's own firmware (below), and publishes `geiger`, `gnss` and `board` to
 `habitat/sensors/<sensor>/exterior`.
@@ -32,6 +37,12 @@ On the Pi, `sensor_drivers/external_board_bridge.py` reads it, or the data of th
   - The GNSS is re-probed every 30 s if it goes missing.
   - A stuck I2C bus is freed by clocking SCL.
   - Wi-Fi reconnects by itself, and USB output continues without it.
+  - Network self-heal, as the internal board: Wi-Fi down 20 s → rejoin; down 3 min → reboot (once per
+    outage); not polled 5 min → restart the web server and mDNS name; not polled 15 min → reboot (once);
+    free memory under 16 KB → reboot. Each self-heal reboot is reported as `heal_cause` on the next boot
+    (2 Wi-Fi lost, 3 not polled, 4 memory low). While the Pi also reads the USB cable (it sends `USB_HOST`
+    every 20 s), the Wi-Fi and not-polled reboots are skipped.
+  - mDNS name `imm-external`: `http://imm-external.local/json` works whatever IP the router gives.
 
 Wiring as built (tested): both modules on the 5 V rail from VIN, the 220 µF across the 5 V rail. Keep the
 GNSS antenna under open sky and the Geiger tube's HV section (≈400 V) enclosed.
@@ -83,6 +94,21 @@ Tested end to end on the MCC stack, with a stand-in board serving a dashboard pa
 **Option B: flash the IMM-OS firmware in this folder.** It adds a watchdog, I2C bus recovery, GNSS UTC, the
 reset reason and a warm-up flag. It replaces the dashboard firmware, but has its own page at `http://<board-ip>/`.
 
+### Flash from the Arduino IDE (Windows/Mac/Linux PC)
+
+The sketch is `arduino/imm_external/imm_external.ino`, the same code as `src/main.cpp`.
+
+1. Arduino IDE 2 → **Boards Manager** → install **esp32 by Espressif Systems** 3.x (built and checked with 3.0.7).
+   No libraries are needed: the GNSS and Geiger are driven at register level.
+2. **File → Open** → `firmware/esp32-external/arduino/imm_external/imm_external.ino`.
+3. **Tools → Board → esp32 → ESP32 Dev Module**, the board's COM port, and **Upload Speed 115200**
+   (faster speeds fail on long or thin cables).
+4. **Upload**. If it sits at `Connecting....`, hold the board's BOOT button until the upload starts.
+5. **Serial Monitor** at 115200, line ending **Newline**. Send `WIFI_SSID <network name>`, then
+   `WIFI_PASS <password>`, then `STATUS` for the IP. JSON lines appear every second.
+6. Point the Pi at it: `EXT_BOARD_URL=http://imm-external.local/json` (or the IP) in `/etc/imm-os/edge.env`,
+   or keep it on a Pi USB port with `EXT_BOARD_PORT`. Restart `imm-sensor-pipeline@external_board_bridge.py`.
+
 ### Flash (from the Pi)
 
 ```bash
@@ -121,4 +147,9 @@ against a simulated TEL0157 register map, Geiger pulses, Wi-Fi and HTTP. It cove
 - fix decoding (southern and western hemispheres, negative altitude), no fix, and a GNSS missing at boot;
 - CPM and dose rate, and ringing pulses counted once;
 - the Wi-Fi commands (including names with spaces) and both endpoints;
-- the watchdog, and recovering a stuck bus.
+- the watchdog, and recovering a stuck bus;
+- the board-health fields and network self-heal (Wi-Fi drop, not polled, low memory, USB_HOST);
+- that the Arduino sketch is identical to `src/main.cpp`.
+
+The stub `Arduino.h` defines the real core's function-like macros (`degrees`, `radians`, `sq`, `constrain`),
+so a firmware function with one of those names fails here as it does on the ESP32.

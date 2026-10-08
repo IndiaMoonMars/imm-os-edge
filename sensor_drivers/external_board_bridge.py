@@ -10,7 +10,9 @@ and publishes each section on its own topic, like the other drivers:
 
     geiger  habitat/sensors/geiger/<zone>   cpm, usv_h, counts, warming   (warming: first minute)
     gnss    habitat/sensors/gnss/<zone>     fix, sats, lat, lon, alt_m, sog_kn, cog_deg
-    board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, rssi_dbm
+    board   habitat/sensors/board/<zone>    uptime_s, reset_reason, boot_count, i2c_err, rssi_dbm,
+                                            heal_cause, heal_reboots, heap_free, heap_min, wifi_drops,
+                                            wifi_reason, net_restarts   (as the internal board)
 
 Zone: EXT_BOARD_ZONE (default "exterior"; not replaced by the node's IMM_ZONE). The Pi
 time-stamps each line when it arrives; the board's GNSS UTC is sent as gnss_utc when there is
@@ -51,9 +53,11 @@ import watchdog  # noqa: E402   (mqtt_publisher is imported in main: --probe/--f
 FIELDS = {
     "geiger": ("cpm", "usv_h", "counts", "warming", "window_s"),
     "gnss": ("fix", "sats", "lat", "lon", "alt_m", "sog_kn", "cog_deg"),
-    "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "rssi_dbm"),
+    "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "rssi_dbm",
+              "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts"),
 }
-INT_FIELDS = {"counts", "warming", "window_s", "fix", "sats", "uptime_s", "reset_reason", "boot_count", "i2c_err", "rssi_dbm"}
+INT_FIELDS = {"counts", "warming", "window_s", "fix", "sats", "uptime_s", "reset_reason", "boot_count", "i2c_err", "rssi_dbm",
+              "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts"}
 
 
 def to_payloads(line: dict, now: float, zone: str):
@@ -423,10 +427,13 @@ def _log(msg: dict) -> None:
     print(json.dumps(msg), file=sys.stderr, flush=True)
 
 
-def usb_link(link, port, baud=115200, mapping=None, opener=None):
+USB_HOST_EVERY_S = 20.0     # as esp32_bridge: the board then never reboots over a Wi-Fi outage
+
+
+def usb_link(link, port, baud=115200, mapping=None, opener=None, heartbeat_s=USB_HOST_EVERY_S, clock=time.monotonic):
     """Thread: what the board prints on its USB cable, as readings → link."""
     opener = opener or (lambda p, b: open_serial(p, b))
-    ser, col, failing = None, LineCollector(mapping), 0
+    ser, col, failing, next_beat, old_firmware = None, LineCollector(mapping), 0, 0.0, False
     while not link.stop.is_set():
         if ser is None:
             try:
@@ -442,6 +449,9 @@ def usb_link(link, port, baud=115200, mapping=None, opener=None):
                 link.stop.wait(5.0)
                 continue
         try:
+            if clock() >= next_beat:
+                ser.write(b"USB_HOST\n")
+                next_beat = clock() + heartbeat_s
             raw = ser.readline()
         except Exception as e:
             _log({"error": f"external board: USB read failed ({e}); reopening {port}"})
@@ -453,7 +463,14 @@ def usb_link(link, port, baud=115200, mapping=None, opener=None):
             continue
         text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
         if text.strip().startswith("#"):
-            _log({"info": f"external board: {text.strip().lstrip('# ')}"})
+            value = text.strip().lstrip("# ")
+            if value.startswith("unknown command"):          # firmware older than USB_HOST: say it once
+                if not old_firmware:
+                    _log({"info": "external board firmware predates USB_HOST: flash the current firmware, or a "
+                                  "Wi-Fi outage can still make it reboot (a few seconds of USB data)"})
+                old_firmware = True
+            else:
+                _log({"info": f"external board: {value}"})
             continue
         line = col.feed(text) if text else col.flush()      # quiet: what was gathered is a reading
         if isinstance(line, dict):
