@@ -20,6 +20,7 @@ Once a sensor passes: add it to IMM_SENSORS (setup-node.sh --sensors) and switch
 in the MCC simulator (SIM_DISABLED_SENSORS=<node>:<sensor>).
 """
 import argparse
+import contextlib
 import glob
 import json
 import os
@@ -252,6 +253,37 @@ def identify(bus, address: int, register: int, names: Dict[int, str]) -> Tuple[O
     return value, names.get(value, f"unknown part (ID 0x{value:02x})")
 
 
+def uses_usb_port(name: str) -> bool:
+    """Does this test read a board's USB serial port (which only one program can read at a time)?"""
+    if name == "esp32":
+        return bool(os.getenv("ESP32_PORT")) or not os.getenv("ESP32_URL")
+    if name == "external":
+        return bool(os.getenv("EXT_BOARD_PORT"))
+    return False
+
+
+@contextlib.contextmanager
+def paused_reader(driver: str, usb: bool, run=subprocess.run):
+    """While the test reads a board's USB port, pause the node's own reader of that board: two
+    programs on one serial port take each other's lines (pyserial: "multiple access on port")."""
+    unit = f"imm-sensor-pipeline@{os.path.basename(driver)}"
+    active = False
+    if usb:
+        try:
+            active = run(["systemctl", "is-active", "--quiet", unit], timeout=10).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            active = False
+    if active:
+        print(f"  · pausing {unit} while testing (it reads the same USB port)")
+        run(["systemctl", "stop", unit], timeout=30)
+    try:
+        yield
+    finally:
+        if active:
+            run(["systemctl", "start", unit], timeout=30)
+            print(f"  · {unit} started again")
+
+
 def run_driver(cmd: List[str], env: dict, count: int, timeout_s: float, notes: List[str] = None) -> Tuple[List[dict], List[str]]:
     """
     Run a driver in stdout mode until `count` JSON readings arrive or the timeout.
@@ -364,8 +396,9 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
     print(f"── Running {sensor.driver} (stdout only, nothing is published) for {count} reading(s){wait}…")
     env = dict(os.environ)
     notes: List[str] = []
-    readings, errors = run_driver([python, sensor.driver, "--mode", "stdout", *sensor.args], env, count,
-                                  sensor.timeout_s, notes)
+    with paused_reader(sensor.driver, uses_usb_port(name)):
+        readings, errors = run_driver([python, sensor.driver, "--mode", "stdout", *sensor.args], env, count,
+                                      sensor.timeout_s, notes)
     for n in notes[-3:]:
         print(f"  · {n}")
     for e in errors[:5]:

@@ -136,3 +136,28 @@ def test_both_links_used_only_when_the_port_is_pinned(monkeypatch):
     monkeypatch.setenv("ESP32_PORT", "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0")
     esp32_bridge.main()
     assert calls == ["http", "dual"]
+
+
+def test_bringup_pauses_the_nodes_reader_while_it_reads_the_same_usb_port(monkeypatch):
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import bringup
+    calls = []
+
+    class R:
+        def __init__(self, rc): self.returncode = rc
+
+    def run(cmd, timeout=None):
+        calls.append(cmd[1])
+        return R(0)
+    monkeypatch.setenv("ESP32_URL", "http://imm-sensors.local/json")
+    monkeypatch.setenv("ESP32_PORT", "/dev/serial/by-id/usb-Silicon_Labs_CP2102_X")
+    assert bringup.uses_usb_port("esp32")
+    with bringup.paused_reader("sensor_drivers/esp32_bridge.py", True, run=run):
+        assert calls == ["is-active", "stop"]                  # paused while the test reads the port
+    assert calls == ["is-active", "stop", "start"]           # and started again afterwards
+    monkeypatch.delenv("ESP32_PORT")
+    assert not bringup.uses_usb_port("esp32")                 # Wi-Fi only: both may poll, nothing paused
+    calls.clear()
+    with bringup.paused_reader("sensor_drivers/esp32_bridge.py", False, run=run):
+        pass
+    assert calls == []
