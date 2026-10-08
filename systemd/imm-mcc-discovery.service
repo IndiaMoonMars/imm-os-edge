@@ -1,0 +1,11 @@
+[Unit]
+Description=IMM-OS: keep imm.local pointing at the MCC (finds it again if its IP changes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# root: updates /etc/hosts and cloud-init's hosts templates
+User=root
+WorkingDirectory=/home/ubuntu/imm-os-edge
+ExecStart=/usr/bin/python3 tools/find_mcc.py

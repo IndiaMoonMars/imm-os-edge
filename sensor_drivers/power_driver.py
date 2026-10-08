@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""IMM-OS Power Monitor Driver — INA219. Modes: stdout | mqtt"""
+"""IMM-OS Power Monitor Driver — INA219. Modes: stdout | mqtt
+
+  INA219_ADDRESS=0x40      0x41 with the A0 jumper bridged (needed when a PCA9685 shares the bus)
+  INA219_SHUNT_OHMS=0.1    the R100 shunt on common breakout boards
+  I2C_BUS=1
+"""
 
 import argparse, sys, time, json, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'core'))
+from hw import env_float, env_int, i2c_bus_number  # noqa: E402
+from mqtt_publisher import MODES, make_publisher  # noqa: E402
 MQTT_TOPIC = "habitat/sensors/ina219/power_bus"
-SHUNT_OHMS = 0.1
 
 def read_loop(publish_fn):
     try:
         from ina219 import INA219
-        ina = INA219(SHUNT_OHMS)
+        # core/ina219.py (register-level; pi-ina219 no longer installs on current Pi OS)
+        ina = INA219(env_float("INA219_SHUNT_OHMS", 0.1), busnum=i2c_bus_number(),
+                     address=env_int("INA219_ADDRESS", 0x40))
         ina.configure()
     except Exception as e:
         print(json.dumps({"error": f"INA219 init: {e}"}), file=sys.stderr); sys.exit(1)
@@ -28,13 +36,9 @@ def read_loop(publish_fn):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["stdout", "mqtt"], default="stdout")
+    parser.add_argument("--mode", choices=MODES, default="stdout")
     args = parser.parse_args()
-    if args.mode == "mqtt":
-        from mqtt_publisher import create_client, publish as mp
-        c = create_client(); publish_fn = lambda p: mp(c, MQTT_TOPIC, p)
-    else:
-        publish_fn = lambda p: print(json.dumps(p), flush=True)
+    publish_fn = make_publisher(args.mode, MQTT_TOPIC)
     read_loop(publish_fn)
 
 if __name__ == "__main__":

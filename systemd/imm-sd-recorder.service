@@ -1,0 +1,24 @@
+[Unit]
+Description=IMM-OS SD-card recorder (every reading as CSV on the Pi, filed by sol)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+# Never give up restarting (the node reports restarts: sysmon svc_restarts → MCC alarm)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/imm-os-edge
+EnvironmentFile=-/etc/imm-os/edge.env
+ExecStart=/usr/bin/python3 core/sd_recorder.py
+Restart=always
+RestartSec=5
+# Watchdog (core/watchdog.py): the loop checks in every 10 s
+WatchdogSec=60
+NotifyAccess=all
+Environment="PYTHONFAULTHANDLER=1"
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
