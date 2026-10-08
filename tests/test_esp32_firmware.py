@@ -430,3 +430,27 @@ def test_wifi_reason_is_why_the_link_dropped_not_the_firmwares_own_rejoin(sim, t
     data, notes = sim(NET + "wifiblock 1\nwifidrop 200\nrun 1\nwifidrop 8\nrun 15\nsend STATUS\nrun 1\n", tmp_path)
     assert _boards(data)[-1]["wifi_reason"] == 200
     assert any(n.startswith("# network: 1 Wi-Fi drop(s) (reason 200, latest 8)") for n in notes)
+
+
+def test_pi_reading_usb_means_a_wifi_outage_never_reboots_the_board(sim, tmp_path):
+    # the Pi sends USB_HOST every 20 s while it reads the USB cable: the readings keep coming over USB
+    beats = "run 20\nsend USB_HOST\n" * 30                       # 10 minutes
+    data, notes = sim(NET + "send USB_HOST\nwifiblock 1\nwifidrop 201\n" + beats + "reboots\nsend STATUS\nrun 1\n", tmp_path)
+    assert "REBOOTS 0" in notes
+    assert not any("self-heal: Wi-Fi still down" in n for n in notes)
+    assert any(n.startswith("# usb: the Pi reads this board over USB too") for n in notes)
+    assert sum(1 for d in data if "bme280" in d) > 500               # USB readings throughout
+    assert not any(n.startswith("# unknown command") for n in notes)  # USB_HOST is silent
+
+
+def test_not_polled_over_wifi_is_fine_while_usb_is_read(sim, tmp_path):
+    beats = "run 20\nsend USB_HOST\n" * 60                       # 20 minutes, never polled over Wi-Fi
+    _, notes = sim(NET + beats + "reboots\n", tmp_path)
+    assert "REBOOTS 0" in notes
+    assert any("web server and mDNS name restarted" in n for n in notes)   # still tries to mend Wi-Fi
+
+
+def test_wifi_self_heal_comes_back_when_the_pi_stops_reading_usb(sim, tmp_path):
+    _, notes = sim(NET + "send USB_HOST\nrun 1\nwifiblock 1\nwifidrop 201\nrun 250\nreboots\n", tmp_path)
+    assert "# self-heal: Wi-Fi still down after 3 min; rebooting" in notes    # heartbeat stopped > 60 s ago
+    assert "REBOOTS 1" in notes

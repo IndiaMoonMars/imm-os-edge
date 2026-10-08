@@ -53,6 +53,9 @@
 //       free memory < 16 KB      → reboot before the network stack runs out
 //     Every self-heal reboot is remembered across it and reported as heal_cause, so the data
 //     says when and why the board restarted.
+//     While the Pi reads the board over its USB cable too (it sends USB_HOST every 20 s), the
+//     Wi-Fi and not-polled reboots are skipped (rejoining and restarting the web server go on):
+//     the USB link still carries every reading, and a reboot would only interrupt it.
 //
 // Warm-up, only where physics needs it:
 //   - MQ-4: 3 min heater warm-up after a real power-on (or brownout). After a watchdog, crash,
@@ -76,6 +79,7 @@
 //   WIFI_SSID <network name>   (the rest of the line: spaces allowed; case kept)
 //   WIFI_PASS <password>       then it connects; WIFI_PASS alone for an open network
 //   WIFI_OFF                   forget the Wi-Fi network
+//   USB_HOST                   (sent by the Pi every 20 s, no reply) the Pi reads this board's USB
 #include <Arduino.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
@@ -108,6 +112,10 @@ static uint32_t healReboots = 0;                 // self-heal reboots since flas
 static uint32_t wifiDownSince = 0, lastRejoin = 0, lastPollMs = 0;
 static bool wifiWasUp = false, wifiWait = false, pollWait = false, pollRestarted = false, heapRebooted = false;
 static uint32_t wifiDrops = 0, netRestarts = 0;
+static const uint32_t USB_HOST_TIMEOUT_MS = 60000;   // USB_HOST heard this recently: the Pi reads our USB
+static uint32_t lastUsbHostMs = 0;
+static bool usbHostSeen = false;
+static bool usbHostReading(uint32_t now) { return usbHostSeen && now - lastUsbHostMs < USB_HOST_TIMEOUT_MS; }
 static volatile int wifiReason = 0;              // latest Wi-Fi disconnect reason (wifi_err_reason_t)
 static int dropReason = 0;                       // the reason the link last went down (not our own rejoins)
 static const uint32_t WDT_TIMEOUT_S = 10;
@@ -757,7 +765,7 @@ static void networkTick(uint32_t now) {
       mdnsStarted = false;                                     // mdnsTick announces the name again
       diag("self-heal: not polled for 5 min; web server and mDNS name restarted");
     }
-    if (now - lastPollMs >= POLL_REBOOT_MS && !pollWait) {
+    if (now - lastPollMs >= POLL_REBOOT_MS && !pollWait && !usbHostReading(now)) {
       pollWait = true;                                         // once, until the Pi polls again: a Pi
       prefs.putUInt("poll_wait", 1);                           // that is off must not cause a reboot loop
       healReboot(HEAL_POLL, "self-heal: still not polled after 15 min; rebooting");
@@ -774,7 +782,7 @@ static void networkTick(uint32_t now) {
     }
     if (!wifiDownSince) wifiDownSince = now ? now : 1;
     lastPollMs = now;                                          // not "unpolled" while the link is down
-    if (now - wifiDownSince >= WIFI_REBOOT_MS && !wifiWait) {
+    if (now - wifiDownSince >= WIFI_REBOOT_MS && !wifiWait && !usbHostReading(now)) {
       wifiWait = true;                                         // once per outage: a router that is off
       prefs.putUInt("wifi_wait", 1);                           // is waited for, not rebooted against
       healReboot(HEAL_WIFI, "self-heal: Wi-Fi still down after 3 min; rebooting");
@@ -806,6 +814,8 @@ static void handleCommand() {
              "reboot(s) since flashing, this start: %d, free memory %lu B", (unsigned long)wifiDrops, dropReason, (int)wifiReason,
              (unsigned long)netRestarts, (unsigned long)healReboots, healCause, (unsigned long)esp_get_free_heap_size());
     diag(b);
+    diag(usbHostReading(millis()) ? "usb: the Pi reads this board over USB too (no Wi-Fi reboots)"
+                                  : "usb: the Pi isn't reading this board's USB");
   } else if (strncmp(cmd, "WIFI_SSID ", 10) == 0) {                  // rest of the line: spaces allowed
     snprintf(wifiSsid, sizeof wifiSsid, "%s", cmd + 10);
     wifiPrefs.putString("ssid", wifiSsid);
@@ -843,12 +853,15 @@ static void handleCommand() {
   } else if (strcmp(cmd, "SCD_ON") == 0) {
     scdEnabled = true; prefs.putUInt("scd_off", 0);
     diag("scd40: enabled; it will be looked for again on the next probe");
+  } else if (strcmp(cmd, "USB_HOST") == 0) {                   // no reply: it comes every 20 s
+    lastUsbHostMs = millis();
+    usbHostSeen = true;
   } else if (strcmp(cmd, "CAL_BNO_CLEAR") == 0) {
     bnoPrefs.remove("off");
     bnoCalRestored = bnoCalSaved = false;
     diag("CAL_BNO_CLEAR: stored BNO055 calibration forgotten");
   } else if (cmdLen) {
-    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, SCD_TEST, SCD_RESET, SCD_OFF, SCD_ON, CAL_BNO_CLEAR, WIFI_SSID, WIFI_PASS, WIFI_OFF)");
+    diag("unknown command (STATUS, CAL_MQ4, CAL_O2, CAL_CO2, ASC_ON, SCD_TEST, SCD_RESET, SCD_OFF, SCD_ON, CAL_BNO_CLEAR, WIFI_SSID, WIFI_PASS, WIFI_OFF, USB_HOST)");
   }
   cmdLen = 0;
 }

@@ -417,6 +417,112 @@ def run_serial(port, publish_fn, zone, now=time.time, mapping=None, baud=115200,
             publish_fn(payload, topic)
 
 
+# ── both links at once: USB cable and Wi-Fi (core/dual_link.py) ─────────
+
+def _log(msg: dict) -> None:
+    print(json.dumps(msg), file=sys.stderr, flush=True)
+
+
+def usb_link(link, port, baud=115200, mapping=None, opener=None):
+    """Thread: what the board prints on its USB cable, as readings → link."""
+    opener = opener or (lambda p, b: open_serial(p, b))
+    ser, col, failing = None, LineCollector(mapping), 0
+    while not link.stop.is_set():
+        if ser is None:
+            try:
+                ser = opener(port, baud)
+                ser.reset_input_buffer()
+                if failing:
+                    _log({"info": f"external board: USB port {port} open again"})
+                failing = 0
+            except Exception as e:
+                failing += 1
+                if failing in (1, 10) or failing % 60 == 0:
+                    _log({"error": f"external board: USB port {port}: {e}"})
+                link.stop.wait(5.0)
+                continue
+        try:
+            raw = ser.readline()
+        except Exception as e:
+            _log({"error": f"external board: USB read failed ({e}); reopening {port}"})
+            try:
+                ser.close()
+            except Exception:
+                pass
+            ser = None
+            continue
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        if text.strip().startswith("#"):
+            _log({"info": f"external board: {text.strip().lstrip('# ')}"})
+            continue
+        line = col.feed(text) if text else col.flush()      # quiet: what was gathered is a reading
+        if isinstance(line, dict):
+            link.put("usb", line)
+
+
+def wifi_link(link, url, mapping=None, fetch=None, wait=None):
+    """Thread: poll the board's data URL once a second → link."""
+    fetch = fetch or poll_http
+    wait = wait or link.stop.wait
+    failing = 0
+    while not link.stop.is_set():
+        try:
+            line = fetch(url)
+            if failing:
+                _log({"info": f"external board answering over Wi-Fi again after {failing} failed poll(s)"})
+            failing = 0
+            if isinstance(line, (dict, list)):
+                link.put("wifi", recognise(line, mapping))
+        except FETCH_ERRORS as e:
+            failing += 1
+            if failing in (1, 10) or failing % 60 == 0:
+                _log({"error": f"external board not answering at {url}: {e}"})
+        wait(1.0)
+
+
+def reading_key(line: dict):
+    """The board's own counter for a reading, if it has one: the same reading over both links has
+    the same one (IMM-OS firmware: "ms"; most sketches: an uptime in seconds)."""
+    ms = line.get("ms")
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+        return ms
+    up = (line.get("board") or {}).get("uptime_s")
+    return up if isinstance(up, (int, float)) and not isinstance(up, bool) else None
+
+
+def run_dual(url, port, publish_fn, zone, baud=115200, mapping=None, now=time.time, link=None, readers=None,
+             max_items=None):
+    """Read the board over its USB cable and over Wi-Fi at once; publish every reading once."""
+    import queue
+    from dual_link import DualLink, LinkReport
+    link = link or DualLink()
+    if readers is None:
+        readers = [(lambda lk, a: usb_link(lk, a, baud, mapping), port), (lambda lk, a: wifi_link(lk, a, mapping), url)]
+    for target, arg in readers:
+        link.run(target, arg)
+    report = LinkReport("external board", _log)
+    n = 0
+    try:
+        while max_items is None or n < max_items:
+            watchdog.kick()
+            try:
+                via, line = link.queue.get(timeout=1.0)
+            except queue.Empty:
+                report.update(link.links())
+                continue
+            n += 1
+            if not link.accept(via, reading_key(line)):
+                continue
+            report.update(link.links())
+            for topic, payload in to_payloads(line, now(), zone):
+                payload["via"] = via
+                if payload["sensor"] == "board":
+                    payload.update(link.links())
+                publish_fn(payload, topic)
+    finally:
+        link.stop.set()
+
+
 def serial_ports(find=None, real=os.path.realpath):
     """The USB serial ports, by names that survive a reboot (ttyUSB0/1 can swap places).
 
@@ -774,7 +880,9 @@ def main():
         return
     from mqtt_publisher import make_publisher
     publish_fn = make_publisher(args.mode, f"habitat/sensors/geiger/{zone}")
-    if url:
+    if url and port:                          # both links: USB cable and Wi-Fi
+        run_dual(url, port, publish_fn, zone, baud=baud, mapping=mapping)
+    elif url:
         run_http(url, publish_fn, zone, mapping=mapping)
     elif port:
         run_serial(port, publish_fn, zone, mapping=mapping, baud=baud)

@@ -9,8 +9,9 @@ tools/local_broker.py) and writes one CSV per sensor and zone:
     /var/lib/imm-os/records/<mission>-<id>/pre-mission/2026-09-26/…     before its Sol 1
     /var/lib/imm-os/records/no-mission/2026-09-29/…                     otherwise (IST date)
 
-Columns: time_ist, time_utc, node_id, zone, one per metric (fixed per sensor), extra (anything
-else, as JSON). The sol comes from the mission start (T0), asked from the MCC
+Columns: time_ist, time_utc, node_id, zone, one per metric (fixed per sensor), via (the link a
+board's reading came by when it is read over its USB cable and Wi-Fi at once: usb or wifi),
+extra (anything else, as JSON). The sol comes from the mission start (T0), asked from the MCC
 (/api/mission/clock) every 5 min and kept in records/.mission.json, so an MCC outage doesn't
 stop the filing; a reading is filed by its own time, not when it arrived.
 
@@ -54,7 +55,8 @@ COLUMNS = {
                "temp", "calib_gyro", "calib_acc", "calib_mag", "cal_restored"],
     "mq4": ["ch4_ppm", "rs_r0", "vout_mv", "rs_rl", "warming", "warm_left_s", "calibrated"],
     "board": ["uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm",
-              "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts"],
+              "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts",
+              "usb_link", "wifi_link"],
     "geiger": ["cpm", "usv_h", "counts", "warming", "window_s"],
     "gnss": ["fix", "sats", "lat", "lon", "alt_m", "sog_kn", "cog_deg", "gnss_utc"],
     "sysmon": ["cpu_temp", "cpu_load", "mem_pct", "disk_pct", "fan_rpm", "power_w", "supply_v", "undervolt",
@@ -154,6 +156,8 @@ class Recorder:
         new = not os.path.exists(path) or os.path.getsize(path) == 0
         if new:
             columns = list(cols or [k for k in payload if k not in META])
+            if "via" not in columns:
+                columns.append("via")              # which link brought the reading: usb or wifi (both-link boards)
         else:                                          # appending after a restart: keep the file's header
             with open(path, newline="") as fh:
                 header = next(csv.reader(fh), [])

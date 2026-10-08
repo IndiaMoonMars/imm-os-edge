@@ -64,6 +64,8 @@ FIELDS = {
     "board": ("uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm",
               "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts"),
 }
+# both links (ESP32_URL and ESP32_PORT set): every reading says which one brought it ("via"), and the
+# board's health reading says which are delivering (usb_link, wifi_link: 1 or 0)
 INT_FIELDS = {"imu_calib", "calib_gyro", "calib_acc", "calib_mag", "warming", "calibrated", "warm_left_s", "cal_restored", "asc",
               "uptime_s", "reset_reason", "boot_count", "i2c_err", "bme_resets", "rssi_dbm",
               "heal_cause", "heal_reboots", "heap_free", "heap_min", "wifi_drops", "wifi_reason", "net_restarts"}
@@ -224,6 +226,19 @@ def failure_kind(e) -> str:
     return "error"
 
 
+def note_restart(line: dict, boot):
+    """Say in the journal when the board's boot counter changes (and why, if it rebooted itself)."""
+    b = line.get("board")
+    if isinstance(b, dict) and isinstance(b.get("boot_count"), int):
+        if boot is not None and b["boot_count"] != boot:
+            cause = HEAL_CAUSES.get(b.get("heal_cause") or 0)
+            print(json.dumps({"info": f"ESP32 board restarted (boot {b['boot_count']}, reset reason "
+                                      f"{b.get('reset_reason')}" + (f", self-heal: {cause}" if cause else "")
+                                      + ")"}), file=sys.stderr, flush=True)
+        return b["boot_count"]
+    return boot
+
+
 def run_http(url, publish_fn, now=time.time, sleep=time.sleep, fetch=None, max_loops=None, address=None,
              clock=time.monotonic):
     """Poll the board's /json over Wi-Fi once a second (the same line it prints on USB)."""
@@ -244,14 +259,7 @@ def run_http(url, publish_fn, now=time.time, sleep=time.sleep, fetch=None, max_l
                                           f"{clock() - down_since:.0f} s"}), file=sys.stderr, flush=True)
             failing = 0
             if isinstance(line, dict) and dedup.new(line):
-                b = line.get("board")
-                if isinstance(b, dict) and isinstance(b.get("boot_count"), int):
-                    if boot is not None and b["boot_count"] != boot:
-                        cause = HEAL_CAUSES.get(b.get("heal_cause") or 0)
-                        print(json.dumps({"info": f"ESP32 board restarted (boot {b['boot_count']}, reset reason "
-                                                  f"{b.get('reset_reason')}" + (f", self-heal: {cause}" if cause else "")
-                                                  + ")"}), file=sys.stderr, flush=True)
-                    boot = b["boot_count"]
+                boot = note_restart(line, boot)
                 for topic, payload in to_payloads(line, now()):
                     publish_fn(payload, topic)
                 explain_mq4(line, warned)
@@ -264,6 +272,127 @@ def run_http(url, publish_fn, now=time.time, sleep=time.sleep, fetch=None, max_l
                 print(json.dumps({"error": f"ESP32 board not answering at {target}: {failure_kind(e)} ({e})"}),
                       file=sys.stderr, flush=True)
         sleep(1.0)
+
+
+# ── both links at once: USB cable and Wi-Fi (core/dual_link.py) ─────────
+USB_HOST_EVERY_S = 20.0     # tell the board the Pi reads its USB: then a Wi-Fi outage never reboots it
+
+
+def _log(msg: dict) -> None:
+    print(json.dumps(msg), file=sys.stderr, flush=True)
+
+
+def usb_link(link, port, opener=None, heartbeat_s=USB_HOST_EVERY_S, clock=time.monotonic):
+    """Thread: the board's lines from its USB cable → link (reopening the port if it goes away)."""
+    opener = opener or open_port
+    ser, next_beat, failing, last_boot, old_firmware = None, 0.0, 0, None, False
+    while not link.stop.is_set():
+        if ser is None:
+            try:
+                ser = opener(port)
+                ser.reset_input_buffer()
+                if failing:
+                    _log({"info": f"ESP32 board: USB port {port} open again"})
+                failing = 0
+            except Exception as e:                           # unplugged, or another program holds it
+                failing += 1
+                if failing in (1, 10) or failing % 60 == 0:
+                    _log({"error": f"ESP32 board: USB port {port}: {e}"})
+                link.stop.wait(5.0)
+                continue
+        try:
+            if clock() >= next_beat:
+                ser.write(b"USB_HOST\n")
+                next_beat = clock() + heartbeat_s
+            raw = ser.readline()
+        except Exception as e:
+            _log({"error": f"ESP32 board: USB read failed ({e}); reopening {port}"})
+            try:
+                ser.close()
+            except Exception:
+                pass
+            ser = None
+            continue
+        parsed = parse_line(raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw))
+        if parsed is None:
+            continue
+        kind, value = parsed
+        if kind == "data":
+            link.put("usb", value)
+        elif kind == "info":
+            if value.startswith("unknown command"):          # firmware older than USB_HOST: say it once
+                if not old_firmware:
+                    _log({"info": "ESP32 board firmware predates USB_HOST: flash the current firmware, or a "
+                                  "Wi-Fi outage can still make it reboot (a few seconds of USB data)"})
+                old_firmware = True
+            else:
+                _log({"info": f"esp32: {value}"})
+        elif kind == "boot":
+            if value != last_boot:
+                _log({"info": f"esp32 start-up: {value[:120]}"})
+            last_boot = value
+
+
+def wifi_link(link, url, fetch=None, address=None, wait=None):
+    """Thread: poll the board's /json over Wi-Fi once a second → link."""
+    import urllib.error
+    from external_board_bridge import FETCH_ERRORS, poll_http
+    fetch = fetch or poll_http
+    address = address or BoardAddress(url)
+    wait = wait or link.stop.wait
+    failing = 0
+    while not link.stop.is_set():
+        target = address.target()
+        try:
+            line = fetch(target)
+            if failing:
+                _log({"info": f"ESP32 board answering over Wi-Fi again after {failing} failed poll(s)"})
+            failing = 0
+            if isinstance(line, dict):
+                link.put("wifi", line)
+        except FETCH_ERRORS + (urllib.error.URLError,) as e:
+            failing += 1
+            address.failed()
+            if failing in (1, 10) or failing % 60 == 0:
+                _log({"error": f"ESP32 board not answering at {target}: {failure_kind(e)} ({e})"})
+        wait(1.0)
+
+
+def run_dual(url, port, publish_fn, now=time.time, link=None, readers=None, max_items=None):
+    """Read the board over its USB cable and over Wi-Fi at once; publish every reading once.
+
+    Each line carries the board's "ms" counter, so the copy that comes over the second link is
+    dropped and a reading one link missed is still taken from the other (core/dual_link.py)."""
+    import queue
+    import watchdog
+    from dual_link import DualLink, LinkReport
+    link = link or DualLink()
+    for target, arg in (readers if readers is not None else [(usb_link, port), (wifi_link, url)]):
+        link.run(target, arg)
+    report = LinkReport("ESP32 board", _log)
+    warned, boot, n = set(), None, 0
+    try:
+        while max_items is None or n < max_items:
+            watchdog.kick()
+            try:
+                via, line = link.queue.get(timeout=1.0)
+            except queue.Empty:
+                report.update(link.links())
+                continue
+            n += 1
+            ms = line.get("ms")
+            if not link.accept(via, ms if isinstance(ms, (int, float)) and not isinstance(ms, bool) else None):
+                continue
+            report.update(link.links())
+            boot = note_restart(line, boot)
+            for topic, payload in to_payloads(line, now()):
+                payload["via"] = via
+                if payload["sensor"] == "board":
+                    payload.update(link.links())
+                publish_fn(payload, topic)
+            explain_mq4(line, warned)
+    finally:
+        link.stop.set()
 
 
 def read_loop(ser, publish_fn, now=time.time):
@@ -324,6 +453,11 @@ def main():
                         help="STATUS, CAL_MQ4, CAL_O2, CAL_CO2 [ppm], ASC_ON, SCD_TEST, SCD_RESET, SCD_OFF, SCD_ON, CAL_BNO_CLEAR, WIFI_SSID <name>, WIFI_PASS <pw>, WIFI_OFF")
     args = parser.parse_args()
     url = os.getenv("ESP32_URL", "").strip()
+    pinned = os.getenv("ESP32_PORT", "").strip()
+    if url and pinned and not args.send:          # both links: USB cable and Wi-Fi
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        run_dual(url, pinned, make_publisher(args.mode, "habitat/sensors/esp32/zone1"))
+        return
     if url and not args.send:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         run_http(url, make_publisher(args.mode, "habitat/sensors/esp32/zone1"))

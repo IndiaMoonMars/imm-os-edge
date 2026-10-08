@@ -13,8 +13,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOARD="${1:-internal}"
 case "$BOARD" in
     internal) FW="$REPO/firmware/esp32-sensors"; SERVICE='imm-sensor-pipeline@esp32_bridge.py' ;;
-    external) FW="$REPO/firmware/esp32-external"; SERVICE='imm-sensor-pipeline@external_board_bridge.py'
-              ESP32_PORT="${EXT_BOARD_PORT:-${ESP32_PORT:-}}"; export ESP32_PORT ;;
+    external) FW="$REPO/firmware/esp32-external"; SERVICE='imm-sensor-pipeline@external_board_bridge.py' ;;
     *) echo "✗ board is 'internal' or 'external'" >&2; exit 1 ;;
 esac
 PIO_HOME_VENV="${IMM_PIO_VENV:-$HOME/.imm-platformio}"
@@ -27,9 +26,29 @@ step() { echo; echo "── $* ──"; }
 [ "$EUID" -ne 0 ] || die "run without sudo (PlatformIO installs into your home directory)"
 
 step "ESP32 on USB"
-PORT=$(cd "$REPO/core" && "$PY" -c 'from hw import esp32_port; print(esp32_port())')
+# Which board is on which USB port is pinned in edge.env by setup-node.sh (from what each board prints).
+# Use it, so the internal firmware can never be flashed onto the external board, or the other way round.
+ENV_FILE="${IMM_ENV_FILE:-/etc/imm-os/edge.env}"
+PINS=$( (cat "$ENV_FILE" 2>/dev/null || sudo -n cat "$ENV_FILE" 2>/dev/null || true) \
+        | grep -E '^(ESP32_PORT|EXT_BOARD_PORT|EXT_BOARD_USB)=' || true)
+pin() { echo "$PINS" | sed -n "s/^$1=//p" | tail -1 | tr -d "\"'"; }
+INT_PIN=$(pin ESP32_PORT)
+EXT_PIN=$(pin EXT_BOARD_PORT); [ -n "$EXT_PIN" ] || EXT_PIN=$(pin EXT_BOARD_USB)
+case "$BOARD" in
+    internal) PORT="${ESP32_PORT:-$INT_PIN}"; OTHER="$EXT_PIN" ;;
+    external) PORT="${ESP32_PORT:-$EXT_PIN}"; OTHER="$INT_PIN" ;;
+esac
+if [ -z "$PORT" ]; then
+    n=$( (ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null || true) | wc -l)
+    [ "$n" -le 1 ] || die "$n USB serial boards are plugged in and none is pinned as the $BOARD board, so which one to flash isn't known. Run setup-node.sh first (--int-board both --ext-board both pins both), or name the port: ESP32_PORT=/dev/serial/by-id/… $0 $BOARD"
+    PORT=$(cd "$REPO/core" && "$PY" -c 'from hw import esp32_port; print(esp32_port())')
+fi
 [ -n "$PORT" ] || die "no ESP32 found: plug the board into a Pi USB port with a data cable (check with: ls /dev/ttyUSB* /dev/ttyACM*)"
-echo "  ✓ $PORT"
+real() { local r; r=$(readlink -f "$1" 2>/dev/null || true); echo "${r:-$1}"; }   # an unplugged board: its name
+if [ -n "$OTHER" ] && [ "$(real "$PORT")" = "$(real "$OTHER")" ]; then
+    die "$PORT is pinned as the other board's port in $ENV_FILE: not flashing the $BOARD firmware onto it"
+fi
+echo "  ✓ $BOARD board on $PORT"
 [ -r "$PORT" ] && [ -w "$PORT" ] || die "no access to $PORT: your user needs the dialout group (setup-node.sh adds it; log out and in, or reboot)"
 if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     echo "  · stopping $SERVICE while flashing (it may hold the port)"

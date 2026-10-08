@@ -276,7 +276,7 @@ int main(int, char** argv) {
       mdnsStarted = false; sim::mdns_up = false; sim::mdns_host.clear();
       sim::reboots = 0; lastI2cOkMs = 0; i2cEverOk = false; lastStallRecover = 0; stallRebooted = false;
       wifiDownSince = lastRejoin = lastPollMs = 0; wifiWasUp = pollRestarted = heapRebooted = false;
-      wifiDrops = netRestarts = 0; wifiReason = 0; dropReason = 0; healCause = HEAL_NONE; webStarted = false; web.routes.clear();
+      wifiDrops = netRestarts = 0; wifiReason = 0; dropReason = 0; lastUsbHostMs = 0; usbHostSeen = false; healCause = HEAL_NONE; webStarted = false; web.routes.clear();
       setup();
     }
     flush();

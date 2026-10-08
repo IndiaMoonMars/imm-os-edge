@@ -36,13 +36,14 @@
 #   --eclss "…"          eclss/ daemons, e.g. "water_monitor eclss_pid"
 #   --eva "…"            eva/ daemons, e.g. "gps_driver uwb_driver position_fusion"
 #   --crew-id ID         wearer of this EVA kit (EVA nodes)
-#   --int-board WHERE    the internal ESP32 sensor board, and adds esp32_bridge.py: usb (default),
-#                        or http://<board-ip>/json once it is on Wi-Fi (WIFI_SSID / WIFI_PASS).
-#                        With --ext-board usb too, both boards' ports are found and pinned in edge.env
-#                        (USB keeps recording with the Wi-Fi off; the SD card gets every reading)
+#   --int-board WHERE    the internal ESP32 sensor board, and adds esp32_bridge.py: usb,
+#                        http://<board-ip>/json (Wi-Fi), or both (USB cable and Wi-Fi at once,
+#                        Wi-Fi at http://imm-sensors.local/json; both:http://<ip>/json for another address)
 #   --ext-board WHERE    the external GNSS + Geiger board, and adds external_board_bridge.py:
 #                        usb (on a Pi USB port; found by what it prints), /dev/serial/by-id/…,
-#                        http://<board-ip>/ (over Wi-Fi), or find (search the local network)
+#                        http://<board-ip>/ (over Wi-Fi), find (search the local network), or both
+#                        (USB cable and Wi-Fi at once). Every USB port is pinned in edge.env by what its
+#                        board prints, so the two boards' readers can never swap or share a port
 #   --user USER          service user (default: the user who ran sudo)
 #   --direct             no local broker: services connect straight to the MCC
 #   --skip-apt           don't install packages
@@ -322,71 +323,118 @@ if [ "$NO_SYSMON" = 0 ]; then
     [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
     case " $SENSORS " in *" sysmon_driver.py "*) ;; *) SENSORS=$(echo "sysmon_driver.py $SENSORS" | xargs) ;; esac
 fi
+# The sensor boards: each over its USB cable, over Wi-Fi, or both at once (two links: losing either
+# loses nothing; core/dual_link.py). One listen over every USB serial port tells the boards apart by
+# what they print, so each reader is pinned to its own board's port and never takes the other's.
+PYBIN="$REPO/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN=python3
+BRIDGE="${IMM_EXT_BOARD_BRIDGE:-$REPO/sensor_drivers/external_board_bridge.py}"   # (tests: a stand-in)
+int_wants_usb=0; ext_wants_usb=0
+case "$INT_BOARD" in usb|both|both:*) int_wants_usb=1 ;; esac
+case "$EXT_BOARD" in usb|both|/dev/*) ext_wants_usb=1 ;; esac
+heard=""
+if [ "$int_wants_usb" = 1 ] || [ "$ext_wants_usb" = 1 ]; then
+    # The board readers hold their USB ports, so nothing could be heard on them: pause them while
+    # listening and start them again straight after, whatever was heard (a failed setup must never
+    # leave the node recording nothing).
+    readers=""
+    if [ "$DRY" = 0 ] && command -v systemctl >/dev/null; then
+        readers=$(systemctl list-units --no-legend --plain --state=active \
+                  'imm-sensor-pipeline@esp32_bridge.py.service' 'imm-sensor-pipeline@external_board_bridge.py.service' \
+                  2>/dev/null | awk '{print $1}' | xargs || true)
+        [ -z "$readers" ] || { echo "  · pausing the board readers while listening: $readers"; systemctl stop $readers; }
+    fi
+    ARG=""; case "$EXT_BOARD" in /dev/*) ARG="$EXT_BOARD" ;; esac
+    RESET=""; [ "$ext_wants_usb" = 1 ] && RESET="--reset"     # the external board says its address only at start-up
+    echo "  · listening to the USB serial ports to tell the boards apart …"
+    heard=$(PYTHONUNBUFFERED=1 "$PYBIN" "$BRIDGE" --listen $ARG $RESET 2>&1 | tee /dev/stderr || true)
+    if [ -n "$readers" ]; then systemctl start $readers; echo "  · board readers started again"; fi
+fi
+heard_int=$(echo "$heard" | sed -n 's/.*internal sensor board: ESP32_PORT=\([^ ]*\).*/\1/p' | head -1)
+heard_ext=$(echo "$heard" | sed -n 's/.*EXT_BOARD_PORT=\([^ ]*\) EXT_BOARD_BAUD=\([0-9]*\).*/\1 \2/p' | head -1)
+heard_ext_url=$(echo "$heard" | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1)
+heard_ext_port=$(echo "$heard" | sed -n "s/.*external board's USB port: EXT_BOARD_USB=\([^ ]*\).*/\1/p" | head -1)
+
+int_json_url() {   # the internal board's address, ending in /json, and whether it answers now
+    local u="$1"
+    case "$u" in */json) ;; *) u="${u%/}/json" ;; esac
+    if curl -fsS -m 5 "$u" 2>/dev/null | grep -q '"ms"'; then ok "internal sensor board answers at $u" >&2
+    else warn "the internal sensor board did not answer at $u now (is it on Wi-Fi? STATUS over USB shows its IP)" >&2; fi
+    echo "$u"
+}
+
 if [ -n "$INT_BOARD" ]; then
     case "$INT_BOARD" in
-        usb) updates+=("ESP32_URL=") ; ok "internal sensor board: USB" ;;
-        http://*|https://*)
-            case "$INT_BOARD" in */json) ;; *) INT_BOARD="${INT_BOARD%/}/json" ;; esac
-            if curl -fsS -m 5 "$INT_BOARD" 2>/dev/null | grep -q '"ms"'; then ok "internal sensor board answers at $INT_BOARD"
-            else warn "the internal sensor board did not answer at $INT_BOARD now (is it on Wi-Fi? STATUS over USB shows its IP)"; fi
-            updates+=("ESP32_URL=$INT_BOARD") ;;
-        *) die "--int-board: usb or http://<board-ip>/json" ;;
+        usb)
+            updates+=("ESP32_URL=")
+            if [ -n "$heard_int" ]; then
+                updates+=("ESP32_PORT=$heard_int"); ok "internal sensor board: USB on $heard_int"
+            else
+                updates+=("ESP32_PORT=")
+                warn "the internal sensor board was not heard on USB (data cable? flashed?); its reader takes the first USB board that isn't the external one"
+            fi ;;
+        http://*|https://*)    # Wi-Fi only: no pinned port, or its reader would read both links
+            u=$(int_json_url "$INT_BOARD"); updates+=("ESP32_URL=$u" "ESP32_PORT=") ;;
+        both|both:*)
+            u="${INT_BOARD#both}"; u="${u#:}"; [ -n "$u" ] || u=http://imm-sensors.local/json
+            u=$(int_json_url "$u"); updates+=("ESP32_URL=$u")
+            if [ -n "$heard_int" ]; then
+                updates+=("ESP32_PORT=$heard_int"); ok "internal sensor board: both links, USB on $heard_int and Wi-Fi at $u"
+            else
+                updates+=("ESP32_PORT=")
+                warn "the internal sensor board was not heard on USB (data cable? flashed?): Wi-Fi only until it is, then run this again"
+            fi ;;
+        *) die "--int-board: usb, http://<board-ip>/json, or both" ;;
     esac
     [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
     case " $SENSORS " in *" esp32_bridge.py "*) ;; *) SENSORS=$(echo "$SENSORS esp32_bridge.py" | xargs) ;; esac
 fi
+
+ext_find() {
+    echo "  · looking for the external board on the local network …" >&2
+    "$PYBIN" "$BRIDGE" --find 2>/dev/null | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true
+}
+
 if [ -n "$EXT_BOARD" ]; then
-    PYBIN="$REPO/.venv/bin/python"; [ -x "$PYBIN" ] || PYBIN=python3
-    BRIDGE="${IMM_EXT_BOARD_BRIDGE:-$REPO/sensor_drivers/external_board_bridge.py}"   # (tests: a stand-in)
     case "$EXT_BOARD" in
-        usb|/dev/*)      # on a Pi USB port: find which port, and its speed, from what it prints
-            # The board readers hold their USB ports, so nothing could be heard on them: stop them
-            # while listening, and start them again straight after, whatever was heard (a failed
-            # setup must never leave the node recording nothing).
-            readers=""
-            if [ "$DRY" = 0 ] && command -v systemctl >/dev/null; then
-                readers=$(systemctl list-units --no-legend --plain --state=active \
-                          'imm-sensor-pipeline@esp32_bridge.py.service' 'imm-sensor-pipeline@external_board_bridge.py.service' \
-                          2>/dev/null | awk '{print $1}' | xargs || true)
-                [ -z "$readers" ] || { echo "  · pausing the board readers while listening: $readers"; systemctl stop $readers; }
-            fi
-            echo "  · listening to the USB serial ports for the external board …"
-            ARG=""; [ "$EXT_BOARD" = usb ] || ARG="$EXT_BOARD"
-            heard=$(PYTHONUNBUFFERED=1 "$PYBIN" "$BRIDGE" --listen $ARG --reset 2>&1 | tee /dev/stderr || true)
-            if [ -n "$readers" ]; then systemctl start $readers; echo "  · board readers started again"; fi
-            found=$(echo "$heard" | sed -n 's/.*EXT_BOARD_PORT=\([^ ]*\) EXT_BOARD_BAUD=\([0-9]*\).*/\1 \2/p' | head -1)
-            EXT_BOARD=$(echo "$heard" | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1)
-            # Both boards on USB: pin the internal one's port too, so neither reader can take the other's
-            internal=$(echo "$heard" | sed -n 's/.*internal sensor board: ESP32_PORT=\([^ ]*\).*/\1/p' | head -1)
-            if [ "$INT_BOARD" = usb ] && [ -n "$internal" ]; then
-                updates+=("ESP32_PORT=$internal")
-                ok "internal sensor board on $internal"
-            elif [ "$INT_BOARD" = usb ]; then
-                warn "the internal sensor board was not heard on USB (data cable? flashed?); its reader takes the first other USB board"
-            fi
-            if [ -n "$found" ]; then
-                updates+=("EXT_BOARD_PORT=${found% *}" "EXT_BOARD_BAUD=${found#* }" "EXT_BOARD_URL=")
-                ok "external board on ${found% *} at ${found#* } baud"
-            elif [ -n "$EXT_BOARD" ]; then
-                ok "external board: its sketch prints no readings on USB, but serves them at $EXT_BOARD"
-                ext_usb=$(echo "$heard" | sed -n "s/.*external board's USB port: EXT_BOARD_USB=\([^ ]*\).*/\1/p" | head -1)
+        usb|/dev/*)      # on a Pi USB port: which port, and its speed, from what it prints
+            if [ -n "$heard_ext" ]; then
+                updates+=("EXT_BOARD_PORT=${heard_ext% *}" "EXT_BOARD_BAUD=${heard_ext#* }" "EXT_BOARD_URL=" "EXT_BOARD_USB=")
+                ok "external board on ${heard_ext% *} at ${heard_ext#* } baud"
+            elif [ -n "$heard_ext_url" ]; then
+                ok "external board: its sketch prints no readings on USB, but serves them at $heard_ext_url"
                 # plugged in, read over Wi-Fi: keep the internal board's reader off its port
-                [ -z "$ext_usb" ] || updates+=("EXT_BOARD_USB=$ext_usb")
+                updates+=("EXT_BOARD_URL=$heard_ext_url" "EXT_BOARD_PORT=" "EXT_BOARD_USB=$heard_ext_port")
             else
                 die "external board not recognised on USB (see its output above). If it says 'no USB serial device', the Pi sees no board on USB at all: check with lsusb (runbook 5.6). Nothing was changed; the readers carry on as before."
             fi ;;
+        both)
+            url="$heard_ext_url"; [ -n "$url" ] || url=$(ext_find)
+            port="${heard_ext% *}"; baud="${heard_ext#* }"
+            if [ -z "$heard_ext" ] && [ -n "$heard_ext_port" ]; then port="$heard_ext_port"; baud=115200; fi
+            if [ -n "$port" ] && [ -n "$url" ]; then
+                updates+=("EXT_BOARD_PORT=$port" "EXT_BOARD_BAUD=$baud" "EXT_BOARD_URL=$url" "EXT_BOARD_USB=")
+                ok "external board: both links, USB on $port and Wi-Fi at $url"
+                [ -n "$heard_ext" ] || warn "its sketch prints no readings on USB yet, so they come over Wi-Fi only for now. Make it print the JSON it serves, once a second, on Serial (runbook 5.6): the USB link then carries them by itself"
+            elif [ -n "$url" ]; then
+                updates+=("EXT_BOARD_URL=$url" "EXT_BOARD_PORT=" "EXT_BOARD_USB=")
+                warn "the external board was not heard on USB: Wi-Fi only ($url)"
+            elif [ -n "$heard_ext" ]; then
+                updates+=("EXT_BOARD_PORT=$port" "EXT_BOARD_BAUD=$baud" "EXT_BOARD_URL=" "EXT_BOARD_USB=")
+                warn "the external board was not found on the Wi-Fi: USB only ($port)"
+            else
+                die "the external board was found neither on USB nor on the Wi-Fi (see above). Nothing was changed; the readers carry on as before."
+            fi ;;
         find)
-            echo "  · looking for the external board on the local network …"
-            EXT_BOARD=$("$PYBIN" "$BRIDGE" --find 2>/dev/null \
-                        | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
-            [ -n "$EXT_BOARD" ] || die "external board not found: is it on the same Wi-Fi as the Pi? Pass --ext-board http://<board-ip>/"
-            ok "external board: $EXT_BOARD" ;;
+            u=$(ext_find)
+            [ -n "$u" ] || die "external board not found: is it on the same Wi-Fi as the Pi? Pass --ext-board http://<board-ip>/"
+            ok "external board: $u"
+            updates+=("EXT_BOARD_URL=$u" "EXT_BOARD_PORT=" "EXT_BOARD_USB=") ;;
         *)
-            EXT_BOARD=$("$PYBIN" "$BRIDGE" --probe "$EXT_BOARD" 2>/dev/null \
-                        | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
-            [ -n "$EXT_BOARD" ] || warn "the external board did not answer with GNSS/Geiger values now; set EXT_BOARD_URL later" ;;
+            u=$("$PYBIN" "$BRIDGE" --probe "$EXT_BOARD" 2>/dev/null \
+                | sed -n 's/.*EXT_BOARD_URL=\(http[^ ]*\).*/\1/p' | head -1 || true)
+            if [ -n "$u" ]; then updates+=("EXT_BOARD_URL=$u" "EXT_BOARD_PORT=" "EXT_BOARD_USB=")
+            else warn "the external board did not answer with GNSS/Geiger values now; set EXT_BOARD_URL later"; fi ;;
     esac
-    [ -z "$EXT_BOARD" ] || updates+=("EXT_BOARD_URL=$EXT_BOARD" "EXT_BOARD_PORT=")
     [ "$SENSORS" != "__unset__" ] || SENSORS=$(envget IMM_SENSORS)
     case " $SENSORS " in *" external_board_bridge.py "*) ;; *) SENSORS=$(echo "$SENSORS external_board_bridge.py" | xargs) ;; esac
 fi

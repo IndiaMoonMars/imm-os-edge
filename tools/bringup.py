@@ -328,7 +328,9 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
         print(f"\n{name}: fix the bus problem above first.")
         return 1
 
-    if sensor.usb and os.getenv("ESP32_URL"):
+    if sensor.usb and os.getenv("ESP32_URL") and os.getenv("ESP32_PORT"):
+        r.ok(f"ESP32 sensor board over both links: USB {os.getenv('ESP32_PORT')} and Wi-Fi {os.getenv('ESP32_URL')}")
+    elif sensor.usb and os.getenv("ESP32_URL"):
         r.ok(f"ESP32 sensor board over Wi-Fi at {os.getenv('ESP32_URL')}")
     elif sensor.usb:
         port = esp32_port()
@@ -345,7 +347,7 @@ def bringup(name: str, sensor: Sensor, count: int, python: str) -> int:
                    "then put EXT_BOARD_URL=http://<board-ip>/… in /etc/imm-os/edge.env")
             print(f"\n{name}: tell the Pi where the board is first.")
             return 1
-        r.ok(f"external board at {url or port}")
+        r.ok(f"external board over both links: USB {port} and Wi-Fi {url}" if url and port else f"external board at {url or port}")
 
     if sensor.chip_id:
         value, part = identify(open_i2c(), *sensor.chip_id)

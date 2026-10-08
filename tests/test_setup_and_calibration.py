@@ -236,3 +236,39 @@ def test_setup_external_board_on_wifi_but_plugged_in_keeps_the_internal_reader_o
     assert out.returncode == 0, out.stdout + out.stderr
     assert "EXT_BOARD_URL=http://192.168.1.125/data" in out.stdout
     assert "EXT_BOARD_USB=/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0" in out.stdout
+
+
+def _fake_listen(tmp_path, monkeypatch, lines):
+    fake = tmp_path / "fake_bridge.py"
+    fake.write_text("import sys\nfor ln in %r:\n    print(ln)\n" % (lines,))
+    monkeypatch.setenv("IMM_EXT_BOARD_BRIDGE", str(fake))
+    secrets = tmp_path / "secrets"
+    secrets.write_text("IMM_EDGE_CLIENT_SECRET=a\nMQTT_PASSWORD=b\n")
+    return ["--secrets-file", str(secrets)]
+
+
+INT_PORT = "/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0"
+EXT_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
+
+
+def test_setup_both_links_for_both_boards_pins_ports_and_keeps_wifi(tmp_path, monkeypatch):
+    # today's boards: the internal one prints its JSON on USB; the external sketch only its address
+    args = _fake_listen(tmp_path, monkeypatch, [
+        f"── {EXT_PORT}", "  · the board says it serves http://192.168.1.125: reading it over Wi-Fi",
+        "  ✓ use EXT_BOARD_URL=http://192.168.1.125/data", f"  ✓ external board's USB port: EXT_BOARD_USB={EXT_PORT}",
+        f"── {INT_PORT}", f"  ✓ internal sensor board: ESP32_PORT={INT_PORT}"])
+    out = _setup_dry(tmp_path, *args, "--int-board", "both", "--ext-board", "both")
+    assert out.returncode == 0, out.stdout + out.stderr
+    for kv in (f"ESP32_PORT={INT_PORT}", "ESP32_URL=http://imm-sensors.local/json", f"EXT_BOARD_PORT={EXT_PORT}",
+               "EXT_BOARD_BAUD=115200", "EXT_BOARD_URL=http://192.168.1.125/data"):
+        assert kv in out.stdout, kv
+    assert "internal sensor board: both links" in out.stdout and "external board: both links" in out.stdout
+    assert "prints no readings on USB yet" in out.stdout        # says what the external sketch still needs
+
+
+def test_setup_wifi_only_clears_a_pinned_port_so_the_reader_uses_one_link(tmp_path, monkeypatch):
+    args = _fake_listen(tmp_path, monkeypatch, [])
+    out = _setup_dry(tmp_path, *args, "--int-board", "http://192.0.2.9/json")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "ESP32_URL=http://192.0.2.9/json" in out.stdout and "ESP32_PORT= " in out.stdout + " "
+    assert "listening to the USB serial ports" not in out.stdout          # no USB wanted: nothing paused or reset
