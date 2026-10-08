@@ -161,3 +161,14 @@ def test_bringup_pauses_the_nodes_reader_while_it_reads_the_same_usb_port(monkey
     with bringup.paused_reader("sensor_drivers/esp32_bridge.py", False, run=run):
         pass
     assert calls == []
+
+
+def test_link_report_says_a_link_is_delivering_even_when_it_was_up_from_the_start():
+    said = []
+    r = dual_link.LinkReport("ESP32 board", said.append)
+    r.update({"usb_link": 1, "wifi_link": 0})                  # USB's first reading came before anything else
+    r.update({"usb_link": 1, "wifi_link": 1})
+    r.update({"usb_link": 0, "wifi_link": 1})
+    msgs = [list(m.values())[0] for m in said]
+    assert msgs == ["ESP32 board: USB cable link delivering", "ESP32 board: Wi-Fi link delivering",
+                    "ESP32 board: USB cable link silent, readings carried by the other link"]

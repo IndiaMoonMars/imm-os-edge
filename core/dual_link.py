@@ -86,7 +86,7 @@ class LinkReport:
     def update(self, links: dict) -> None:
         for name, up in links.items():
             was = self.state.get(name)
-            if was is not None and was != up:
+            if (was is None and up) or (was is not None and was != up):     # a link already up at start says so too
                 what = "USB cable" if name == "usb_link" else "Wi-Fi"
                 self.out({"info" if up else "error":
                           f"{self.board}: {what} link {'delivering' if up else 'silent'}"
