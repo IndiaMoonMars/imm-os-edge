@@ -58,5 +58,13 @@ class HardwareSerial {
   int read() { int c = (unsigned char)sim::rx[0]; sim::rx.erase(0, 1); return c; }
   void print(const char* s) { sim::tx += s; }
   void println(const char* s) { sim::tx += s; sim::tx += "\n"; }
+  void flush() {}
 };
 extern HardwareSerial Serial;
+
+// The real core's function-like macros (cores/esp32/Arduino.h): a firmware function of the same name
+// must fail here as it fails on the ESP32.
+#define radians(deg) ((deg) * DEG_TO_RAD)
+#define degrees(rad) ((rad) * RAD_TO_DEG)
+#define sq(x) ((x) * (x))
+#define constrain(amt, low, high) ((amt) < (low) ? (low) : ((amt) > (high) ? (high) : (amt)))

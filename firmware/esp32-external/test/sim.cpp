@@ -8,10 +8,16 @@
 //     nofix SATS                  receiver on, no fix yet
 //     remove | add                take the GNSS off / put it back on the bus
 //     i2cstuck N | resetreason R | reset | wdt | http PATH | wifi
+//     poll                        the Pi reads /json
+//     wifidrop REASON             the Wi-Fi link drops (ESP-IDF disconnect reason)
+//     wifiblock 0|1               1: the network refuses to take the board back (begin() fails)
+//     heap BYTES                  free memory the heap reports (and its low-water mark)
+//     reboots | net | mdns | nvs KEY     print what the firmware did
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include "Arduino.h"
+#include "ESPmDNS.h"
 #include "Preferences.h"
 #include "WebServer.h"
 #include "WiFi.h"
@@ -22,7 +28,12 @@
 namespace sim {
 uint32_t now_ms = 0; uint64_t now_us = 0;
 std::string rx, tx, wifi_ssid, wifi_pass;
-bool wifi_up = false, wifi_stack = false;
+bool wifi_up = false, wifi_stack = false, wifi_blocked = false, wifi_sleep = true;
+int wifi_begins = 0, web_begins = 0, reboots = 0;
+std::function<void(WiFiEvent_t, WiFiEventInfo_t)> wifi_on_disconnect;
+uint32_t heap_free = 200000, heap_min = 180000;
+std::string mdns_host;
+bool mdns_up = false;
 int reset_reason = 1, sda_stuck_clocks = 0, scl_pulses = 0, wire_restarts = 0;
 uint32_t wdt_timeout_s = 0, wdt_last_feed = 0, wdt_max_gap = 0;
 bool wdt_added = false;
@@ -98,12 +109,28 @@ int main(int, char** argv) {
     else if (op == "i2cstuck") ss >> sim::sda_stuck_clocks;
     else if (op == "resetreason") ss >> sim::reset_reason;
     else if (op == "wdt") std::cout << "WDT " << sim::wdt_max_gap << " " << sim::wdt_timeout_s * 1000 << "\n";
+    else if (op == "poll") web.routes.at("/json")();
+    else if (op == "wifidrop") {
+      int r; ss >> r; sim::wifi_up = false;
+      if (sim::wifi_on_disconnect) { WiFiEventInfo_t i{}; i.wifi_sta_disconnected.reason = r; sim::wifi_on_disconnect(ARDUINO_EVENT_WIFI_STA_DISCONNECTED, i); }
+    }
+    else if (op == "wifiblock") { int b; ss >> b; sim::wifi_blocked = b != 0; }
+    else if (op == "heap") { ss >> sim::heap_free; sim::heap_min = std::min(sim::heap_min, sim::heap_free); }
+    else if (op == "reboots") std::cout << "REBOOTS " << sim::reboots << "\n";
+    else if (op == "mdns") std::cout << "MDNS " << sim::mdns_host << " " << sim::mdns_up << "\n";
+    else if (op == "net") std::cout << "NET begins=" << sim::wifi_begins << " web=" << sim::web_begins
+                                    << " sleep=" << sim::wifi_sleep << "\n";
+    else if (op == "nvs") { std::string k; ss >> k; std::cout << "NVS " << k << " " << (sim::nvs.count(k) ? sim::nvs[k] : "-1") << "\n"; }
     else if (op == "wifi") std::cout << "WIFI " << sim::wifi_ssid << " " << sim::wifi_pass << " " << sim::wifi_up << "\n";
     else if (op == "http") { std::string p; ss >> p; web.routes.at(p)(); std::cout << "HTTP " << web.code << " " << web.type << " " << web.body.substr(0, 400) << "\n"; }
     else if (op == "reset") {
       gnssFound = false; i2cErr = 0; i2cStreak = 0; i2cRecoveries = 0; lastSample = lastProbe = lastBoard = lastRecovery = 0;
       geigerPulses = geigerSeen = geigerTotal = 0; bucketPos = bucketsFilled = 0; memset(bucket, 0, sizeof bucket);
       wifiSsid[0] = wifiPass[0] = 0; sim::wifi_up = false; sim::now_ms = 0; sim::wdt_added = false; sim::wdt_max_gap = 0;
+      mdnsStarted = false; sim::mdns_up = false; sim::mdns_host.clear(); sim::reboots = 0;
+      wifiDownSince = lastRejoin = lastPollMs = 0; wifiWasUp = pollRestarted = heapRebooted = false;
+      wifiDrops = netRestarts = 0; wifiReason = 0; dropReason = 0; lastUsbHostMs = 0; usbHostSeen = false;
+      healCause = HEAL_NONE; webStarted = false; web.routes.clear(); cmdLen = 0;
       setup();
     }
     flush();

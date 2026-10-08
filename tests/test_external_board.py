@@ -22,6 +22,14 @@ def test_sections_become_streams():
     assert out["habitat/sensors/geiger/exterior"]["usv_h"] == 0.117
 
 
+def test_board_health_fields_pass_through_as_the_internal_boards():
+    board = {"uptime_s": 61, "reset_reason": 3, "boot_count": 4, "i2c_err": 0, "rssi_dbm": -58, "heal_cause": 2,
+             "heal_reboots": 1, "heap_free": 201234, "heap_min": 187654, "wifi_drops": 1, "wifi_reason": 201,
+             "net_restarts": 0}
+    p = dict(eb.to_payloads({"board": board}, 1.0, "exterior"))["habitat/sensors/board/exterior"]
+    assert {k: p[k] for k in board} == board and all(isinstance(p[k], int) for k in board)
+
+
 def test_no_fix_publishes_satellite_count_only():
     out = dict(eb.to_payloads({"gnss": {"fix": 0, "sats": 2}}, 1.0, "exterior"))
     assert out["habitat/sensors/gnss/exterior"] == {"sensor": "gnss", "timestamp": 1.0, "zone": "exterior", "fix": 0, "sats": 2}
